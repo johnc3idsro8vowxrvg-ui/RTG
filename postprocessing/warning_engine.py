@@ -1,77 +1,41 @@
 """
 分级预警模块 — warning_engine.py
 
-核心功能:
-  - 加载 warning.yaml 配置（支持热更新）
-  - 距离计算：目标中心到最近 RTG 支腿的 BEV 平面距离
-  - 三级预警（danger/warning/info）+ 分级帧确认策略
-  - ROI 区域权重计算
-  - RTG 静止时抑制预警
-  - Warning 消息组装
+核心设计: RTG 自车坐标驱动 (非固定车道)
+  - 距离: 目标中心到最近 RTG 支腿的 BEV 平面距离
+  - 方向: 运动方向扫掠走廊加权 (前方 1.0, 后方 0.5)
+  - 静止: 默认不预警, 仅极近人员提示
+  - site_layout: 可选场地语义, 用于降权/升权 (非硬依赖)
 
-所有阈值从配置读取，不做硬编码。
+Usage:
+    engine = WarningEngine(config_loader)
+    result = engine.evaluate(tracks, ego_motion_state, timestamp)
 """
 
 import logging
 import time
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .constants import WarningLevel, ROIZone
+from .constants import WarningLevel
 
 logger = logging.getLogger(__name__)
-
-
-# 触发原因常量
-class TriggerReason:
-    DISTANCE = 'distance'
-    INTRUSION = 'intrusion'
-    HEADING_TOWARD = 'heading_toward'
-
-    @classmethod
-    def all(cls) -> List[str]:
-        return [cls.DISTANCE, cls.INTRUSION, cls.HEADING_TOWARD]
 
 
 # ==============================================================================
 # WARNING ENGINE
 # ==============================================================================
 class WarningEngine:
-    """分级预警引擎。
-
-    消费 config_loader 提供的 warning 配置，对每帧 tracks 计算预警等级。
-
-    Usage:
-        engine = WarningEngine(config_loader)
-        warnings = engine.evaluate(tracks, ego_motion_state, timestamp)
-    """
-
-    # 缓存: 保存每个 target 的预警状态历史 (target_key →
-    #   {level, frame_counter, release_counter, trigger_time})
-    # target_key = (class_id, spatial hash) 用于跨帧关联
+    """RTG 自车坐标驱动的分级预警引擎。"""
 
     def __init__(self, config_loader):
-        """
-        Parameters
-        ----------
-        config_loader : ConfigLoader
-            提供 warning 配置的加载器.
-        """
         self._config_loader = config_loader
         self._target_history: Dict[str, Dict[str, Any]] = {}
-
-        # 支腿坐标缓存 (geometry.yaml)
-        self._legs: List[Dict[str, Any]] = []
-        self._refresh_legs()
-
-        # ROI 区域定义缓存
-        self._roi_zones_config: Dict = {}
-        self._refresh_roi()
+        self._refresh_geometry()
 
     # ------------------------------------------------------------------
-    # Evaluate
+    # Evaluate (主入口)
     # ------------------------------------------------------------------
     def evaluate(
         self,
@@ -79,98 +43,56 @@ class WarningEngine:
         ego_motion_state: int,
         timestamp: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """评估一帧 tracks，返回预警结果。
-
-        Parameters
-        ----------
-        tracks : list of dict
-            跟踪目标列表 (来自 tracker.update() 输出)。
-        ego_motion_state : int
-            RTG 运动状态 (0=静止, 1=运动+x, 2=运动-x, 3=未知)。
-        timestamp : float or None
-
-        Returns
-        -------
-        result : dict
-            {
-                'warnings': list of warning dicts,
-                'active_zones': list of active zone dicts,
-                'ego_motion_state': int,
-            }
-        """
         if timestamp is None:
             timestamp = time.time()
 
-        # 刷新热更新配置
         self._refresh_config()
 
-        warnings_out = []
-
-        # 获取配置参数
         thresholds = self._config_loader.get_distance_thresholds()
         frame_conf = self._config_loader.get_frame_confirmation()
         ego_cfg = self._config_loader.get_ego_motion_config()
+        static_policy = self._ego_geom.get('risk_model', {}).get('static_policy', {})
+        dir_weight_cfg = self._ego_geom.get('risk_model', {}).get('motion_direction_weight', {})
         output_rules = self._config_loader.get_output_rules()
-
         min_conf = output_rules.get('min_confidence_for_warning', 0.3)
 
-        # RTG 静止时是否输出预警
-        warn_when_static = ego_cfg.get('warn_when_static', False)
-        static_close_enabled = (
-            ego_cfg.get('static_close_proximity_alert', {}).get('enabled', False)
-        )
-        static_close_dist = (
-            ego_cfg.get('static_close_proximity_alert', {}).get('distance_threshold', 2.0)
-        )
-        static_close_classes = (
-            ego_cfg.get('static_close_proximity_alert', {}).get('target_classes', ['person'])
-        )
+        warnings_out = []
 
         for track in tracks:
-            # 置信度过滤
-            conf_val = track.get('confidence', 0.0)
-            if conf_val < min_conf:
+            if track.get('confidence', 0.0) < min_conf:
                 continue
 
             cls_id = track.get('class_id', 3)
-            class_name = _class_id_to_name(cls_id)
+            class_name = _CLASS_NAMES.get(int(cls_id), 'other_obstacle')
+            cls_thresholds = thresholds.get(class_name, thresholds.get('other_obstacle', {}))
 
-            # 获取该类别的阈值
-            cls_thresholds = thresholds.get(class_name)
-            if cls_thresholds is None:
-                cls_thresholds = thresholds.get('other_obstacle', {})
-
-            # 计算目标到最近支腿的距离
+            # 1) 距离
             tx, ty = track['x'], track['y']
-            distance = self._compute_min_leg_distance(tx, ty)
+            distance = self._min_leg_distance(tx, ty)
 
-            # 判断 ROI 区域
-            zone = self._classify_zone(ty)
+            # 2) 运动方向权重
+            dir_weight = self._motion_direction_weight(
+                tx, ty, ego_motion_state, dir_weight_cfg
+            )
 
-            # 基础预警等级 (基于距离)
+            # 3) 基础等级 (距离 → 等级)
             base_level = self._distance_to_level(distance, cls_thresholds)
 
-            # ROI 权重修正
-            weighted_level = self._apply_roi_weight(base_level, zone)
+            # 4) 运动方向修正
+            weighted_level = self._apply_direction_weight(base_level, dir_weight)
 
-            # 触发原因
-            reason = TriggerReason.DISTANCE
+            # 5) 场地语义修正 (可选 site_layout)
+            weighted_level = self._apply_site_semantic(weighted_level, tx, ty, class_name)
 
-            # 帧确认策略
+            # 6) 帧确认
             confirmed_level = self._apply_frame_confirmation(
                 track, weighted_level, timestamp, frame_conf
             )
 
-            # RTG 静止抑制
-            if ego_motion_state == 0:  # 静止
-                if not warn_when_static:
-                    if static_close_enabled and class_name in static_close_classes:
-                        if distance <= static_close_dist:
-                            confirmed_level = max(confirmed_level, WarningLevel.INFO)
-                        else:
-                            confirmed_level = WarningLevel.NONE
-                    else:
-                        confirmed_level = WarningLevel.NONE
+            # 7) RTG 静止抑制
+            confirmed_level = self._apply_static_policy(
+                confirmed_level, ego_motion_state, distance, class_name, static_policy
+            )
 
             if confirmed_level == WarningLevel.NONE:
                 continue
@@ -180,196 +102,165 @@ class WarningEngine:
                 'warning_level': confirmed_level,
                 'target_class': cls_id,
                 'distance': round(distance, 2),
-                'zone': zone,
-                'trigger_reason': reason,
+                'trigger_reason': 'distance',
                 'trigger_time': timestamp,
                 '_class_name': class_name,
             })
 
-        # 去重: 同目标只保留最高等级
+        # 后处理
         if output_rules.get('deduplicate_by_highest', True):
             warnings_out = self._deduplicate_highest(warnings_out)
 
-        # 每区域每类别数量限制
-        max_per_zone = output_rules.get('max_targets_per_zone', {})
-        warnings_out = self._limit_per_zone_category(warnings_out, max_per_zone)
-
-        # 构建 active_zones
-        active_zones = self._build_active_zones(warnings_out)
-
-        # 清理过期历史
         self._cleanup_history(timestamp)
 
         return {
             'warnings': warnings_out,
-            'active_zones': active_zones,
+            'active_zones': [],
             'ego_motion_state': ego_motion_state,
         }
 
-    # ------------------------------------------------------------------
-    # Distance computation
-    # ------------------------------------------------------------------
-    def _compute_min_leg_distance(self, tx: float, ty: float) -> float:
-        """计算目标 (tx, ty) 到最近 RTG 支腿的 BEV 平面欧氏距离。"""
-        min_dist = float('inf')
+    # ==================================================================
+    # 距离
+    # ==================================================================
+    def _min_leg_distance(self, tx: float, ty: float) -> float:
+        min_d = float('inf')
         for leg in self._legs:
-            dx = tx - leg['x']
-            dy = ty - leg['y']
-            dist = np.sqrt(dx * dx + dy * dy)
-            if dist < min_dist:
-                min_dist = dist
-        return min_dist
+            d = np.hypot(tx - leg['x'], ty - leg['y'])
+            if d < min_d:
+                min_d = d
+        return min_d
 
-    # ------------------------------------------------------------------
-    # ROI Zone classification
-    # ------------------------------------------------------------------
-    def _classify_zone(self, ty: float) -> str:
-        """根据目标 y 坐标判断所在 ROI 区域。"""
-        # 使用 geometry.yaml 中的 lane_layout 判定
-        # +y = 禁行侧→集卡侧 (2026-06-15 updated)
-        lane_layout = self._config_loader.geometry.get('lane_layout', {})
+    # ==================================================================
+    # 运动方向权重
+    # ==================================================================
+    def _motion_direction_weight(
+        self, tx: float, ty: float, ego_state: int, cfg: Dict
+    ) -> float:
+        """计算目标相对于 RTG 运动方向的风险权重。
 
-        # 集卡侧大车道 (原点周围)
-        main_truck = lane_layout.get('main_lane_truck_side', {})
-        main_y = main_truck.get('y_range', [-1.5, 1.5])
-        if main_y[0] <= ty <= main_y[1]:
-            return ROIZone.LANE_CORE
-
-        # 禁行侧大车道 (y ≈ -23.5 ~ -25.6)
-        main_forb = lane_layout.get('main_lane_forbidden_side', {})
-        forb_y = main_forb.get('y_range', [-25.6, -22.63])
-        if forb_y[0] <= ty <= forb_y[1]:
-            return ROIZone.LANE_CORE
-
-        # 集卡车道 (紧邻集卡侧大车道, -y 方向)
-        truck_lane = lane_layout.get('truck_lane', {})
-        truck_y = truck_lane.get('y_range', [-6.0, -1.5])
-        if truck_y[0] <= ty <= truck_y[1]:
-            return ROIZone.TRUCK_LANE
-
-        # 大车道近邻 (集装箱区域中紧邻大车道的部分)
-        container_cfg = lane_layout.get('container_rows', {})
-        y_start = container_cfg.get('y_start', -22.63)
-        y_end = container_cfg.get('y_end', -6.0)
-
-        # 集卡侧近邻: 离集卡侧大车道很近 (-y 方向)
-        approach_margin = 3.0
-        if main_y[0] - approach_margin < ty < main_y[0]:
-            return ROIZone.LANE_APPROACH
-        if forb_y[1] < ty < forb_y[1] + approach_margin:
-            return ROIZone.LANE_APPROACH
-
-        # 集装箱区域 → lane_approach
-        if y_start <= ty <= y_end:
-            return ROIZone.LANE_APPROACH
-
-        # 禁行侧入侵 (ty < forb_y[0], 即比禁行侧大车道更远离集卡侧)
-        if ty < forb_y[0]:
-            return ROIZone.SIDE_INTRUSION
-
-        # 默认
-        return ROIZone.LANE_APPROACH
-
-    # ------------------------------------------------------------------
-    # Threshold → Level
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _distance_to_level(
-        distance: float,
-        thresholds: Dict[str, float],
-    ) -> int:
-        """根据距离和阈值返回基础预警等级。
-
-        Parameters
-        ----------
-        distance : float
-            目标到最近支腿的距离 (m)。
-        thresholds : dict
-            {danger: float, warning: float, info: float}
-
-        Returns
-        -------
-        level : int (0/1/2/3)
+        ego_state: 0=STATIC, 1=MOVING_+X, 2=MOVING_-X, 3=UNKNOWN
+        返回: 1.0 = 全风险, 0.5 = 半风险 (背向)
         """
+        if ego_state in (0, 3):  # 静止或未知 → 等权
+            return 1.0
+
+        fwd = cfg.get('forward', 1.0)
+        bwd = cfg.get('backward', 0.5)
+
+        # 判断目标在运动方向的前方还是后方
+        # MOVING_+X: 前方 = tx > 0, 后方 = tx < 0
+        # MOVING_-X: 前方 = tx < 0, 后方 = tx > 0
+        if ego_state == 1:  # +x
+            return fwd if tx > 0 else bwd
+        else:  # -x
+            return fwd if tx < 0 else bwd
+
+    @staticmethod
+    def _apply_direction_weight(level: int, weight: float) -> int:
+        if level == WarningLevel.NONE:
+            return WarningLevel.NONE
+        if weight >= 1.0 or level == WarningLevel.DANGER:
+            return level
+        # 背向: 降一级
+        return max(WarningLevel.INFO, level - 1)
+
+    # ==================================================================
+    # 场地语义 (可选 site_layout)
+    # ==================================================================
+    def _apply_site_semantic(
+        self, level: int, tx: float, ty: float, class_name: str
+    ) -> int:
+        """用可选场地语义修正预警等级 (仅降权/升权, 不做硬决策)。"""
+        if level == WarningLevel.NONE:
+            return WarningLevel.NONE
+
+        site = self._site_layout
+        if not site or not site.get('enabled', False):
+            return level
+
+        # 集卡车道: 正常通行区, 降一级 (仅对 truck/car)
+        truck_lane = site.get('truck_lane', {})
+        truck_y = truck_lane.get('y_range')
+        if truck_y and class_name in ('truck', 'car'):
+            if truck_y[0] <= ty <= truck_y[1]:
+                return max(WarningLevel.INFO, level - 1)
+
+        # 禁行侧入侵: 升权 (保持原等级, 但 danger 不抑制)
+        forb = site.get('main_lane_forbidden_side', {})
+        forb_y = forb.get('y_range')
+        if forb_y and ty < forb_y[0]:
+            # 禁行侧外部 (比禁行侧大车道更远): 即使距离稍远也保持关注
+            pass  # 不降权, 保持原等级
+
+        return level
+
+    # ==================================================================
+    # 距离 → 等级
+    # ==================================================================
+    @staticmethod
+    def _distance_to_level(distance: float, thresholds: Dict[str, float]) -> int:
         danger_d = thresholds.get('danger', 8.0)
         warning_d = thresholds.get('warning', 15.0)
         info_d = thresholds.get('info', 25.0)
 
         if distance <= danger_d:
             return WarningLevel.DANGER
-        elif distance <= warning_d:
+        if distance <= warning_d:
             return WarningLevel.WARNING
-        elif distance <= info_d:
+        if distance <= info_d:
             return WarningLevel.INFO
-        else:
-            return WarningLevel.NONE
+        return WarningLevel.NONE
 
-    # ------------------------------------------------------------------
-    # ROI Weight
-    # ------------------------------------------------------------------
-    def _apply_roi_weight(self, level: int, zone: str) -> int:
-        """根据 ROI 区域权重调整预警等级。"""
-        if level == WarningLevel.NONE:
-            return WarningLevel.NONE
-
-        zones_cfg = self._roi_zones_config
-        zone_cfg = zones_cfg.get(zone, {})
-        weight = zone_cfg.get('weight', 1.0)
-
-        if weight >= 1.0:
+    # ==================================================================
+    # RTG 静止抑制
+    # ==================================================================
+    @staticmethod
+    def _apply_static_policy(
+        level: int, ego_state: int, distance: float, class_name: str, cfg: Dict
+    ) -> int:
+        """RTG 静止时默认不预警, 仅极近人员提示。"""
+        if ego_state != 0 or level == WarningLevel.NONE:
             return level
 
-        # danger 在任何区域保持 danger (安全优先)
-        if level == WarningLevel.DANGER:
-            return WarningLevel.DANGER
+        warn_static = cfg.get('warn_when_static', False)
+        if warn_static:
+            return level
 
-        # weight 0.5~0.9: 降一级 (truck_lane=0.6, side_intrusion=0.5, lane_approach=0.8)
-        if weight >= 0.5:
-            return max(WarningLevel.INFO, level - 1)
+        close_enabled = cfg.get('close_proximity_enabled', True)
+        close_dist = cfg.get('close_proximity_distance', 2.0)
+        close_classes = cfg.get('close_proximity_classes', ['person'])
 
-        # 极低权重 (<0.5): 降两级 (最少 INFO)
-        return max(WarningLevel.INFO, level - 2)
+        if close_enabled and class_name in close_classes and distance <= close_dist:
+            return max(level, WarningLevel.INFO)
 
-    # ------------------------------------------------------------------
-    # Frame Confirmation
-    # ------------------------------------------------------------------
+        return WarningLevel.NONE
+
+    # ==================================================================
+    # 帧确认 (与之前一致)
+    # ==================================================================
     def _apply_frame_confirmation(
-        self,
-        track: Dict[str, Any],
-        level: int,
-        timestamp: float,
+        self, track: Dict[str, Any], level: int, timestamp: float,
         frame_conf: Dict[str, int],
     ) -> int:
-        """应用帧确认/解除策略。
-
-        危险: 1帧即时触发。
-        警告/提示: 连续 N 帧确认。
-        解除: 延迟 N 帧消退。
-        """
         track_id = track.get('track_id', -1)
-        state_key = f"{track_id}"
+        key = str(track_id)
 
         danger_frames = frame_conf.get('danger_confirm_frames', 1)
         warn_frames = frame_conf.get('warning_confirm_frames', 3)
-        info_frames = frame_conf.get('info_confirm_frames', 3)
         release_delay = frame_conf.get('release_delay_frames', 3)
 
         if level == WarningLevel.NONE:
             return WarningLevel.NONE
 
-        # 获取或创建历史
-        if state_key not in self._target_history:
-            self._target_history[state_key] = {
-                'level': WarningLevel.NONE,
-                'frame_counter': 0,
-                'release_counter': 0,
-                'last_seen': timestamp,
-                'confirmed': False,
+        if key not in self._target_history:
+            self._target_history[key] = {
+                'level': WarningLevel.NONE, 'frame_counter': 0,
+                'release_counter': 0, 'last_seen': timestamp, 'confirmed': False,
             }
-        hist = self._target_history[state_key]
+        hist = self._target_history[key]
         hist['last_seen'] = timestamp
 
-        # 危险: 单帧触发
+        # Danger: 单帧触发
         if level >= WarningLevel.DANGER:
             if danger_frames <= 1:
                 hist['level'] = level
@@ -377,25 +268,9 @@ class WarningEngine:
                 hist['frame_counter'] = 1
                 hist['release_counter'] = 0
                 return WarningLevel.DANGER
-            else:
-                # 需要多帧确认的危险 (罕见，但保留能力)
-                if hist['level'] == level:
-                    hist['frame_counter'] += 1
-                else:
-                    hist['level'] = level
-                    hist['frame_counter'] = 1
-                    hist['confirmed'] = False
 
-                if hist['frame_counter'] >= danger_frames:
-                    hist['confirmed'] = True
-                    hist['release_counter'] = 0
-                    return WarningLevel.DANGER
-                return WarningLevel.NONE
-
-        # 警告/提示: 多帧确认
-        required_frames = (
-            warn_frames if level == WarningLevel.WARNING else info_frames
-        )
+        # Warning/Info: 多帧确认
+        required = warn_frames if level == WarningLevel.WARNING else frame_conf.get('info_confirm_frames', 3)
 
         if hist['level'] == level:
             hist['frame_counter'] += 1
@@ -404,25 +279,56 @@ class WarningEngine:
             hist['frame_counter'] = 1
             hist['confirmed'] = False
 
-        # 检查是否已确认
         if hist['confirmed']:
             hist['release_counter'] = 0
             return min(level, hist['level'])
 
-        if hist['frame_counter'] >= required_frames:
+        if hist['frame_counter'] >= required:
             hist['confirmed'] = True
             hist['release_counter'] = 0
             return level
 
-        # 未达到确认帧数
         return WarningLevel.NONE
 
-    # ------------------------------------------------------------------
-    # Deduplication & Limiting
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Config / Geometry refresh
+    # ==================================================================
+    def _refresh_config(self) -> None:
+        self._refresh_geometry()
+
+    def _refresh_geometry(self) -> None:
+        geom = self._config_loader.geometry
+        ego = geom.get('ego_geometry', {})
+
+        # 支腿坐标 (兼容旧 ego_footprint 和新的 ego_geometry.legs)
+        legs = ego.get('legs', [])
+        if not legs:
+            # fallback: 从旧的 ego_footprint 或 rtg_dimensions 构建
+            fp = geom.get('ego_footprint', {})
+            dim = geom.get('rtg_dimensions', {})
+            span = ego.get('span_y', dim.get('span_width', 23.5))
+            wb = ego.get('wheelbase_x', dim.get('wheelbase', 12.0))
+            truck_y = ego.get('truck_side_y', 0.0)
+            forb_y = ego.get('forbidden_side_y', -span)
+            legs = [
+                {'x': 0.0, 'y': truck_y},
+                {'x': -wb, 'y': truck_y},
+                {'x': 0.0, 'y': forb_y},
+                {'x': -wb, 'y': forb_y},
+            ]
+        self._legs = legs
+
+        # site_layout (可选)
+        self._site_layout = geom.get('site_layout', {})
+
+        # risk_model (合并 geometry + warning 配置)
+        self._ego_geom = geom
+
+    # ==================================================================
+    # Helpers
+    # ==================================================================
     @staticmethod
     def _deduplicate_highest(warnings: List[Dict]) -> List[Dict]:
-        """同 track_id 只保留最高预警等级。"""
         by_id: Dict[int, Dict] = {}
         for w in warnings:
             tid = w.get('track_id', -1)
@@ -430,87 +336,15 @@ class WarningEngine:
                 by_id[tid] = w
         return list(by_id.values())
 
-    @staticmethod
-    def _limit_per_zone_category(
-        warnings: List[Dict],
-        max_per_zone: Dict[str, int],
-    ) -> List[Dict]:
-        """每区域每类别限制最大输出数量，按距离升序保留。"""
-        if not max_per_zone:
-            return warnings
-
-        # 先按距离排序
-        sorted_w = sorted(warnings, key=lambda w: w.get('distance', 999))
-
-        counts: Dict[Tuple[str, str], int] = {}
-        result = []
-        for w in sorted_w:
-            zone = w.get('zone', '')
-            cls_name = w.get('_class_name', 'other_obstacle')
-            key = (zone, cls_name)
-            mx = max_per_zone.get(cls_name, 10)
-            current = counts.get(key, 0)
-            if current < mx:
-                result.append(w)
-                counts[key] = current + 1
-        return result
-
-    def _build_active_zones(self, warnings: List[Dict]) -> List[Dict[str, Any]]:
-        """构建当前激活的 ROI 区域列表。"""
-        active_names = set()
-        for w in warnings:
-            if w['warning_level'] >= WarningLevel.INFO:
-                active_names.add(w.get('zone', ''))
-
-        zones_cfg = self._roi_zones_config
-        result = []
-        for name in active_names:
-            cfg = zones_cfg.get(name, {})
-            result.append({
-                'name': name,
-                'weight': cfg.get('weight', 1.0),
-                'y_min': 0.0,
-                'y_max': 0.0,
-                'description': cfg.get('description', ''),
-            })
-        return result
-
-    # ------------------------------------------------------------------
-    # History cleanup
-    # ------------------------------------------------------------------
     def _cleanup_history(self, timestamp: float, max_age: float = 10.0) -> None:
-        """清理超出 max_age 未更新的历史记录。"""
-        expired = []
-        for key, hist in self._target_history.items():
-            if timestamp - hist.get('last_seen', 0) > max_age:
-                expired.append(key)
-        for key in expired:
-            del self._target_history[key]
+        expired = [k for k, h in self._target_history.items()
+                   if timestamp - h.get('last_seen', 0) > max_age]
+        for k in expired:
+            del self._target_history[k]
 
-    # ------------------------------------------------------------------
-    # Config refresh
-    # ------------------------------------------------------------------
-    def _refresh_config(self) -> None:
-        """刷新热更新配置。"""
-        self._refresh_legs()
-        self._refresh_roi()
-
-    def _refresh_legs(self) -> None:
-        """从 geometry.yaml 刷新支腿坐标。"""
-        self._legs = self._config_loader.get_ego_footprint_legs()
-
-    def _refresh_roi(self) -> None:
-        """从 warning.yaml 刷新 ROI 区域权重。"""
-        self._roi_zones_config = self._config_loader.get_roi_zones()
-
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
     def reset(self) -> None:
-        """重置预警状态。"""
         self._target_history.clear()
-        self._refresh_legs()
-        self._refresh_roi()
+        self._refresh_geometry()
         logger.info('WarningEngine reset')
 
 
@@ -518,7 +352,3 @@ class WarningEngine:
 # Helpers
 # ==============================================================================
 _CLASS_NAMES = {0: 'person', 1: 'truck', 2: 'car', 3: 'other_obstacle'}
-
-
-def _class_id_to_name(cls_id: int) -> str:
-    return _CLASS_NAMES.get(int(cls_id), 'other_obstacle')

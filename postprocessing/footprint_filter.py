@@ -72,9 +72,40 @@ class SelfFootprintFilter:
         with open(path, 'r') as f:
             geom = yaml.safe_load(f)
 
+        # 优先新格式: ego_geometry
+        ego = geom.get('ego_geometry', {})
+        if ego:
+            assemblies = [
+                ('truck_side', ego.get('truck_side_assembly', {})),
+                ('forbidden_side', ego.get('forbidden_side_assembly', {})),
+            ]
+            for name, assy in assemblies:
+                if not assy:
+                    continue
+                x_min = float(assy.get('x_min', 0))
+                x_max = float(assy.get('x_max', 0))
+                y_min = float(assy.get('y_min', 0))
+                y_max = float(assy.get('y_max', 0))
+                if x_min == x_max or y_min == y_max:
+                    continue
+
+                zone = FootprintZone(
+                    name=name,
+                    x_min=x_min, x_max=x_max,
+                    y_min=y_min, y_max=y_max,
+                )
+                self._zones.append(zone)
+                logger.info(f'Footprint {name}: x=[{x_min},{x_max}], '
+                            f'y=[{y_min},{y_max}]')
+
+            if self._zones:
+                self.has_footprint = True
+                return
+
+        # 旧格式 fallback: ego_footprint = {truck_lane_side: {front_leg: {x,y}, ...}, ...}
         footprint = geom.get('ego_footprint', {})
         if not footprint:
-            logger.warning('ego_footprint 未在 geometry.yaml 中配置，'
+            logger.warning('ego_footprint/ego_geometry 未在 geometry.yaml 中配置，'
                            '自车点云过滤将跳过')
             return
 
@@ -92,17 +123,10 @@ class SelfFootprintFilter:
             rw = float(rear.get('width', 1.0))
             rl = float(rear.get('length', 1.0))
 
-            # 连接梁矩形: 从后腿后端到前腿前端
             x_min = min(rx - rl / 2, fx - fl / 2)
             x_max = max(rx + rl / 2, fx + fl / 2)
-
-            # y 方向取两腿宽度的并集
-            # 腿的 y 范围 = [leg.y - width/2, leg.y + width/2]
             y_min = min(fy - fw / 2, ry - rw / 2)
             y_max = max(fy + fw / 2, ry + rw / 2)
-
-            # 如果前后腿宽度不同，用更宽的那个；这里假设同宽
-            # 实际取并集
 
             zone = FootprintZone(
                 name=side_key,

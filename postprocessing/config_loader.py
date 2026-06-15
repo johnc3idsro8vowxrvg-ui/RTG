@@ -138,8 +138,16 @@ class ConfigLoader:
     def get_ego_footprint_legs(self) -> List[Dict[str, Any]]:
         """返回 4 条支腿的地面投影坐标列表。
 
-        每条腿: {x, y, width, length, side, position}
+        优先从 ego_geometry.legs 读取 (新格式),
+        兼容旧 ego_footprint 格式。
         """
+        # 新格式: ego_geometry.legs = [{x, y}, ...]
+        ego = self._geometry.get('ego_geometry', {})
+        new_legs = ego.get('legs', [])
+        if new_legs:
+            return [{'x': float(l['x']), 'y': float(l['y'])} for l in new_legs]
+
+        # 旧格式 fallback: ego_footprint = {truck_lane_side: {front_leg: {x,y}, rear_leg: {x,y}}, ...}
         footprint = self._geometry.get('ego_footprint', {})
         legs = []
         for side_key, side in footprint.items():
