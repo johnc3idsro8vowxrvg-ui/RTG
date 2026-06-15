@@ -21,7 +21,7 @@ ax.set_ylim(-40, 40)
 ax.set_aspect('equal')
 ax.grid(True, alpha=0.08, linestyle='--', linewidth=0.3)
 ax.set_xlabel('x — 大车道方向   +x (C1朝向)     -x →', fontsize=11, labelpad=8)
-ax.set_ylabel('y — 跨距方向   集卡侧 → 禁行侧 (+y)', fontsize=11)
+ax.set_ylabel('y — 跨距方向   禁行侧 → 集卡侧 (+y)', fontsize=11)
 ax.set_title('RTG BEV 传感器 FOV 俯视图 — 动态演示', fontsize=15, fontweight='bold')
 
 # ═══ Static lane fills ═══

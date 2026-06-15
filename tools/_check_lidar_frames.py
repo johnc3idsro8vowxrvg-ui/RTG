@@ -210,7 +210,7 @@ For RoboSense 32 rotated 90° (L3/L4):
 """)
 
     print("\nNext step: compare results with BEV convention:")
-    print("  BEV +x = 大车道方向, +y = 集卡侧→禁行侧, +z = 竖直向上")
+    print("  BEV +x = 大车道方向, +y = 禁行侧→集卡侧, +z = 竖直向上")
 
 
 if __name__ == '__main__':

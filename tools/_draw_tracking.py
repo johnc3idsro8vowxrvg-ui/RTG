@@ -79,7 +79,7 @@ def draw_bev_scene_background(
 ) -> None:
     """绘制 BEV 场景背景（大车道、集卡车道、集装箱区、RTG footprint）。
 
-    坐标系: x=大车道方向, y=跨距方向(集卡侧→禁行侧)
+    坐标系: x=大车道方向, y=跨距方向(禁行侧→集卡侧)
     """
     ax.set_xlim(*x_lim)
     ax.set_ylim(*y_lim)
