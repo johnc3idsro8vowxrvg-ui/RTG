@@ -95,8 +95,8 @@ output_rules:
   # 同目标只输出最高等级
   deduplicate_by_highest: true
 
-  # 同类别最多输出 N 个目标
-  max_targets_per_zone:
+  # 同类别最多输出 N 个目标 (按距离升序取最近)
+  max_targets_per_class:
     person: 5
     truck: 3
     car: 3
@@ -104,11 +104,3 @@ output_rules:
 
   # 置信度低于此值的目标不参与预警
   min_confidence_for_warning: 0.3
-
-  # 输出必含字段
-  required_fields:
-    - target_id
-    - class_name
-    - warning_level
-    - distance
-    - trigger_reason

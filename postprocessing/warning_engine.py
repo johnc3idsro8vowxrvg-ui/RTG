@@ -111,6 +111,10 @@ class WarningEngine:
         if output_rules.get('deduplicate_by_highest', True):
             warnings_out = self._deduplicate_highest(warnings_out)
 
+        max_per_class = output_rules.get('max_targets_per_class', {})
+        if max_per_class:
+            warnings_out = self._limit_per_class(warnings_out, max_per_class)
+
         self._cleanup_history(timestamp)
 
         return {
@@ -318,9 +322,12 @@ class WarningEngine:
             hist['confirmed_level'] = level
             return level
 
-        # 已确认但当前帧等级不同 (降级过渡): 至少输出当前 level
+        # 已确认但当前帧等级不同 (降级过渡): 输出较低等级, 同步更新 confirmed_level
+        # 避免 release hold 阶段复活旧的高等级
         if hist['confirmed']:
-            return min(level, hist['confirmed_level'])
+            out = min(level, hist['confirmed_level'])
+            hist['confirmed_level'] = out
+            return out
 
         return WarningLevel.NONE
 
@@ -369,6 +376,25 @@ class WarningEngine:
             if tid not in by_id or w['warning_level'] > by_id[tid]['warning_level']:
                 by_id[tid] = w
         return list(by_id.values())
+
+    @staticmethod
+    def _limit_per_class(warnings: List[Dict], max_per_class: Dict) -> List[Dict]:
+        """按类别限制最大输出数量，按距离升序保留最近的目标。"""
+        # 按类别分组
+        by_class: Dict[str, List[Dict]] = {}
+        for w in warnings:
+            cls = w.get('_class_name', 'other_obstacle')
+            if cls not in by_class:
+                by_class[cls] = []
+            by_class[cls].append(w)
+
+        result = []
+        for cls, ws in by_class.items():
+            limit = max_per_class.get(cls, max_per_class.get('other_obstacle', 5))
+            # 按距离升序，保留最近的 limit 个
+            ws.sort(key=lambda w: w.get('distance', 999))
+            result.extend(ws[:limit])
+        return result
 
     def _cleanup_history(self, timestamp: float, max_age: float = 10.0) -> None:
         expired = [k for k, h in self._target_history.items()
