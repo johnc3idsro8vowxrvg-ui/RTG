@@ -1,7 +1,7 @@
-# WarningZone.msg — 预警 ROI 区域描述
+# WarningZone.msg — [deprecated] 预警 ROI 区域 (已废弃, 保留兼容)
 
-string name                       # 区域名称
-float32 weight                    # 区域权重
-float32 y_min                     # BEV 坐标系 y 下界 (米)
-float32 y_max                     # BEV 坐标系 y 上界 (米)
-string description                # 区域描述
+string name                       # [deprecated]
+float32 weight                    # [deprecated]
+float32 y_min                     # [deprecated]
+float32 y_max                     # [deprecated]
+string description                # [deprecated]

@@ -84,10 +84,12 @@ class WarningEngine:
             # 5) 场地语义修正 (可选 site_layout)
             weighted_level = self._apply_site_semantic(weighted_level, tx, ty, class_name)
 
-            # 6) 帧确认
-            confirmed_level = self._apply_frame_confirmation(
-                track, weighted_level, timestamp, frame_conf
+            # 6) 帧确认 (返回 (level, hold_distance, reason) 三元组)
+            track_id = track.get('track_id', -1)
+            conf_result = self._apply_frame_confirmation(
+                track, weighted_level, timestamp, distance, frame_conf
             )
+            confirmed_level, hold_distance, trigger_reason = conf_result
 
             # 7) RTG 静止抑制
             confirmed_level = self._apply_static_policy(
@@ -97,12 +99,15 @@ class WarningEngine:
             if confirmed_level == WarningLevel.NONE:
                 continue
 
+            # hold 帧用确认时的距离, 否则用当前距离
+            out_distance = hold_distance if trigger_reason == 'release_hold' else distance
+
             warnings_out.append({
-                'track_id': track.get('track_id', -1),
+                'track_id': track_id,
                 'warning_level': confirmed_level,
                 'target_class': cls_id,
-                'distance': round(distance, 2),
-                'trigger_reason': 'distance',
+                'distance': round(out_distance, 2),
+                'trigger_reason': trigger_reason,
                 'trigger_time': timestamp,
                 '_class_name': class_name,
             })
@@ -262,8 +267,8 @@ class WarningEngine:
     # ==================================================================
     def _apply_frame_confirmation(
         self, track: Dict[str, Any], level: int, timestamp: float,
-        frame_conf: Dict[str, int],
-    ) -> int:
+        distance: float, frame_conf: Dict[str, int],
+    ) -> tuple:
         track_id = track.get('track_id', -1)
         key = str(track_id)
 
@@ -276,6 +281,7 @@ class WarningEngine:
                 'level': WarningLevel.NONE, 'frame_counter': 0,
                 'release_counter': 0, 'last_seen': timestamp,
                 'confirmed': False, 'confirmed_level': WarningLevel.NONE,
+                'confirmed_distance': 0.0,
             }
         hist = self._target_history[key]
         hist['last_seen'] = timestamp
@@ -285,12 +291,13 @@ class WarningEngine:
             if hist['confirmed']:
                 hist['release_counter'] += 1
                 if hist['release_counter'] < release_delay:
-                    return hist['confirmed_level']
+                    return (hist['confirmed_level'], hist['confirmed_distance'], 'release_hold')
                 # 超过释放帧数, 彻底解除
                 hist['confirmed'] = False
                 hist['confirmed_level'] = WarningLevel.NONE
+                hist['confirmed_distance'] = 0.0
                 hist['release_counter'] = 0
-            return WarningLevel.NONE
+            return (WarningLevel.NONE, 0.0, '')
 
         hist['release_counter'] = 0
 
@@ -300,8 +307,9 @@ class WarningEngine:
                 hist['level'] = level
                 hist['confirmed'] = True
                 hist['confirmed_level'] = level
+                hist['confirmed_distance'] = distance
                 hist['frame_counter'] = 1
-                return WarningLevel.DANGER
+                return (WarningLevel.DANGER, distance, 'distance')
 
         # ---- Warning/Info: 多帧确认 ----
         required = warn_frames if level == WarningLevel.WARNING else frame_conf.get('info_confirm_frames', 3)
@@ -320,16 +328,16 @@ class WarningEngine:
         if hist['frame_counter'] >= required:
             hist['confirmed'] = True
             hist['confirmed_level'] = level
-            return level
+            hist['confirmed_distance'] = distance
+            return (level, distance, 'distance')
 
-        # 已确认但当前帧等级不同 (降级过渡): 输出较低等级, 同步更新 confirmed_level
-        # 避免 release hold 阶段复活旧的高等级
+        # 已确认但当前帧等级不同 (降级过渡)
         if hist['confirmed']:
             out = min(level, hist['confirmed_level'])
             hist['confirmed_level'] = out
-            return out
+            return (out, hist['confirmed_distance'], 'release_hold')
 
-        return WarningLevel.NONE
+        return (WarningLevel.NONE, 0.0, '')
 
     # ==================================================================
     # Config / Geometry refresh
