@@ -67,7 +67,7 @@ lidars:
     location: 禁行侧前支腿
     model: RoboSense 32线
     frequency: 10 Hz
-    points_per_frame: ~17000
+    points_per_frame: "~17000"
     fields: [x, y, z, intensity]
     # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
     tf_translation: { x: -23.5, y: 0.0, z: 1.5 }
@@ -81,7 +81,7 @@ lidars:
     location: 禁行侧后支腿
     model: RoboSense 32线
     frequency: 10 Hz
-    points_per_frame: ~18000
+    points_per_frame: "~18000"
     fields: [x, y, z, intensity]
     # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
     tf_translation: { x: -23.5, y: -12.0, z: 1.5 }
