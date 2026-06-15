@@ -248,46 +248,45 @@ class WarningEngine:
     def _classify_zone(self, ty: float) -> str:
         """根据目标 y 坐标判断所在 ROI 区域。"""
         # 使用 geometry.yaml 中的 lane_layout 判定
+        # +y = 禁行侧→集卡侧 (2026-06-15 updated)
         lane_layout = self._config_loader.geometry.get('lane_layout', {})
 
-        # 集卡侧大车道
+        # 集卡侧大车道 (原点周围)
         main_truck = lane_layout.get('main_lane_truck_side', {})
         main_y = main_truck.get('y_range', [-1.5, 1.5])
         if main_y[0] <= ty <= main_y[1]:
             return ROIZone.LANE_CORE
 
-        # 禁行侧大车道
+        # 禁行侧大车道 (y ≈ -23.5 ~ -25.6)
         main_forb = lane_layout.get('main_lane_forbidden_side', {})
-        forb_y = main_forb.get('y_range', [22.63, 25.0])
+        forb_y = main_forb.get('y_range', [-25.6, -22.63])
         if forb_y[0] <= ty <= forb_y[1]:
             return ROIZone.LANE_CORE
 
-        # 集卡车道
+        # 集卡车道 (紧邻集卡侧大车道, -y 方向)
         truck_lane = lane_layout.get('truck_lane', {})
-        truck_y = truck_lane.get('y_range', [1.5, 6.0])
+        truck_y = truck_lane.get('y_range', [-6.0, -1.5])
         if truck_y[0] <= ty <= truck_y[1]:
             return ROIZone.TRUCK_LANE
 
         # 大车道近邻 (集装箱区域中紧邻大车道的部分)
-        # 集卡侧近邻: y 在 [大车道上界, 集卡车道]
-        # 禁行侧近邻: y 在 [最后一列箱, 禁行侧大车道下界]
         container_cfg = lane_layout.get('container_rows', {})
-        y_start = container_cfg.get('y_start', 6.0)
-        y_end = container_cfg.get('y_end', 22.63)
+        y_start = container_cfg.get('y_start', -22.63)
+        y_end = container_cfg.get('y_end', -6.0)
 
-        # 集卡侧近邻: 离集卡侧大车道很近
+        # 集卡侧近邻: 离集卡侧大车道很近 (-y 方向)
         approach_margin = 3.0
-        if main_y[1] < ty < main_y[1] + approach_margin:
+        if main_y[0] - approach_margin < ty < main_y[0]:
             return ROIZone.LANE_APPROACH
-        if forb_y[0] - approach_margin < ty < forb_y[0]:
+        if forb_y[1] < ty < forb_y[1] + approach_margin:
             return ROIZone.LANE_APPROACH
 
         # 集装箱区域 → lane_approach
         if y_start <= ty <= y_end:
             return ROIZone.LANE_APPROACH
 
-        # 禁行侧入侵
-        if ty > forb_y[1]:
+        # 禁行侧入侵 (ty < forb_y[0], 即比禁行侧大车道更远离集卡侧)
+        if ty < forb_y[0]:
             return ROIZone.SIDE_INTRUSION
 
         # 默认

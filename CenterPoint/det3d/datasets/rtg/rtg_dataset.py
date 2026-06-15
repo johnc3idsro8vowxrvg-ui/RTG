@@ -77,7 +77,9 @@ class RTGDataset(PointCloudDataset):
         if gt_boxes_7d.shape[-1] == 9:
             return gt_boxes_7d.astype(np.float32)
         gt_boxes_9d = np.zeros((gt_boxes_7d.shape[0], 9), dtype=np.float32)
-        gt_boxes_9d[:, :7] = gt_boxes_7d[:, :7]
+        gt_boxes_9d[:, :6] = gt_boxes_7d[:, :6]   # x, y, z, w, l, h
+        gt_boxes_9d[:, 8] = gt_boxes_7d[:, 6]      # yaw → index 8
+        # vx, vy (indices 6,7) remain 0
         return gt_boxes_9d
 
     def get_sensor_data(self, idx):
@@ -189,10 +191,12 @@ class LoadRTGAnnotations(object):
             gt_boxes = info["gt_boxes"].astype(np.float32)
             gt_boxes[np.isnan(gt_boxes)] = 0
 
-            # Convert 7-d → 9-d (add zero velocity for CenterHead compatibility)
+            # Convert 7-d → 9-d: [x,y,z,w,l,h,yaw] → [x,y,z,w,l,h,vx,vy,yaw]
             if gt_boxes.ndim == 2 and gt_boxes.shape[-1] == 7:
                 gt_boxes_9d = np.zeros((gt_boxes.shape[0], 9), dtype=np.float32)
-                gt_boxes_9d[:, :7] = gt_boxes
+                gt_boxes_9d[:, :6] = gt_boxes[:, :6]   # x, y, z, w, l, h
+                gt_boxes_9d[:, 8] = gt_boxes[:, 6]      # yaw → index 8
+                # vx, vy (indices 6,7) remain 0
                 gt_boxes = gt_boxes_9d
 
             res["lidar"]["annotations"] = {

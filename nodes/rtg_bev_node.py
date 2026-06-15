@@ -508,31 +508,57 @@ class RTGBEVNode:
         """点云预处理: 外参拼接 + self-footprint 过滤。
 
         处理流程:
-          1. 读取 lidar_01 / lidar_02 点云
-          2. 外参拼接 (rear→front 坐标系, 需 calib.yaml)
-          3. 自车 footprint 过滤 (基于 geometry.yaml)
+          1. 读取 lidar_01 (L1, front/BEV origin) 和 lidar_02 (L2, rear) 点云
+          2. L2 外参变换到 L1/BEV 坐标系 (LIDAR_RE_to_LIDAR_FR)
+          3. 各自 footprint 过滤 (按 lidar_id)
+          4. 拼接为统一 BEV 点云
         """
-        points_list = []
-        for key in ('lidar_01', 'lidar_02'):
-            msg = sensor_frame.get(key)
-            if msg is not None:
-                pts = _pointcloud2_to_numpy(msg)
-                if pts is not None and len(pts) > 0:
-                    points_list.append(pts)
+        # ---- 加载 L2→L1 外参 ----
+        T_l2_to_l1 = np.eye(4, dtype=np.float32)
+        calib = self._config.calib
+        extrinsics = calib.get('extrinsics', {})
+        lr2lf = extrinsics.get('LIDAR_RE_to_LIDAR_FR', {})
+        if lr2lf:
+            R = np.array(lr2lf.get('R', [[1,0,0],[0,1,0],[0,0,1]]), dtype=np.float32)
+            T = np.array(lr2lf.get('T', [0,0,0]), dtype=np.float32)
+            T_l2_to_l1[:3, :3] = R
+            T_l2_to_l1[:3, 3] = T
 
-        if not points_list:
+        lidar_inputs = [
+            (1, 'lidar_01'),  # (lidar_id, sensor_key): L1 = front/BEV origin
+            (2, 'lidar_02'),  # L2 = rear
+        ]
+
+        merged_parts = []
+        for lidar_id, key in lidar_inputs:
+            msg = sensor_frame.get(key)
+            if msg is None:
+                continue
+            pts = _pointcloud2_to_numpy(msg)
+            if pts is None or len(pts) == 0:
+                continue
+
+            # L2 → L1/BEV 坐标变换
+            if lidar_id == 2:
+                N = pts.shape[0]
+                pts_xyz = pts[:, :3]
+                ones = np.ones((N, 1), dtype=np.float32)
+                pts_h = np.hstack([pts_xyz, ones])
+                pts_xyz_t = (T_l2_to_l1 @ pts_h.T).T[:, :3]
+                pts[:, :3] = pts_xyz_t
+
+            # 自车 footprint 过滤 (各雷达独立过滤)
+            if self._footprint_filter is not None and \
+               self._footprint_filter.has_footprint:
+                pts = self._footprint_filter.filter(pts, lidar_id=lidar_id)
+
+            if len(pts) > 0:
+                merged_parts.append(pts)
+
+        if not merged_parts:
             return np.zeros((0, 3), dtype=np.float32)
 
-        merged = np.vstack(points_list)
-
-        # ---- 自车 footprint 过滤 ----
-        if self._footprint_filter is not None and \
-           self._footprint_filter.has_footprint:
-            # 当前仅单雷达 (lidar_01 = L1, 集卡侧前), 直接过滤
-            merged = self._footprint_filter.filter(merged, lidar_id=1)
-            # TODO: 双雷达时需分别用对应 lidar_id 过滤再拼接
-
-        return merged
+        return np.vstack(merged_parts)
 
     def _preprocess_camera(
         self, sensor_frame: Dict[str, Any]

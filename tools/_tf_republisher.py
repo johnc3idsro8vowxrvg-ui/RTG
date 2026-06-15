@@ -9,7 +9,7 @@ TF tree + point cloud republisher + CameraInfo for RTG bag RViz visualization.
   L4: RPY = (+96°, +2°, -90°)      (RoboSense 32 旋转90°安装)
   Note: RoboSense 32线旋转90°安装 → 垂直360°/水平~70° 沿大车道扫描
   BEV 坐标直接用于 TF (与 ROS 一致): +y = 禁行侧→集卡侧 = ROS left
-  L2→L1 merge: pure translation (0, -12.0) in TF frame
+  L2→L1 merge: pure translation (-12.0, 0, 0) in BEV/TF frame (LIDAR_RE_to_LIDAR_FR)
   Camera orientations — R_y(±90°), HFOV 87.6°, VFOV 46°
 """
 import sys, math
