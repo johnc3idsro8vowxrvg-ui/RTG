@@ -55,7 +55,7 @@ lidars:
     frequency: 10 Hz
     points_per_frame: 262144
     fields: [x, y, z, t, ring, range, reflectivity, near_ir]
-    tf_translation: { x: 0.0, y: -12.0, z: 1.5 }
+    tf_translation: { x: 12.0, y: 0.0, z: 1.5 }
     bev_translation: { x: 12.0, y: 0.0, z: 1.5 }
     rpy: { roll: 0.0, pitch: 0.0, yaw: -0.82 }  # 集装箱边缘分析 + RViz
     estimation_method: container_edge_analysis
@@ -70,7 +70,7 @@ lidars:
     points_per_frame: "~17000"
     fields: [x, y, z, intensity]
     # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
-    tf_translation: { x: -23.5, y: 0.0, z: 1.5 }
+    tf_translation: { x: 0.0, y: -23.5, z: 1.5 }
     bev_translation: { x: 0.0, y: -23.5, z: 1.5 }
     rpy: { roll: 90.0, pitch: 6.0, yaw: 90.0 }   # RViz 视觉对齐
     estimation_method: rviz_visual_alignment
@@ -84,8 +84,8 @@ lidars:
     points_per_frame: "~18000"
     fields: [x, y, z, intensity]
     # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
-    tf_translation: { x: -23.5, y: -12.0, z: 1.5 }
-    bev_translation: { x: 12.0, y: -23.5, z: 1.5 }
+    tf_translation: { x: -12.0, y: -23.5, z: 1.5 }
+    bev_translation: { x: -12.0, y: -23.5, z: 1.5 }
     rpy: { roll: 96.0, pitch: 2.0, yaw: -90.0 }   # RViz 视觉对齐
     estimation_method: rviz_visual_alignment
     estimation_date: 2026-06-11
@@ -137,7 +137,7 @@ cameras:
     resolution: [1080, 1920]
     encoding: bgr8
     frequency: 10 Hz
-    tf_translation: { x: -23.5, y: 0.0, z: 4.0 }
+    tf_translation: { x: 0.0, y: -23.5, z: 4.0 }
     bev_translation: { x: 0.0, y: -23.5, z: 4.0 }
     orientation: R_y(+90°)
     synthetic_intrinsic:
@@ -153,8 +153,8 @@ cameras:
     resolution: [1080, 1920]
     encoding: bgr8
     frequency: 10 Hz
-    tf_translation: { x: -23.4, y: -12.0, z: 4.0 }
-    bev_translation: { x: 12.0, y: -23.4, z: 4.0 }
+    tf_translation: { x: -12.0, y: -23.4, z: 4.0 }
+    bev_translation: { x: -12.0, y: -23.4, z: 4.0 }
     orientation: R_y(-90°)
     synthetic_intrinsic:
       fx: 1272.2
