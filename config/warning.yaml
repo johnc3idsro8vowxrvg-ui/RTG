@@ -25,7 +25,7 @@ frame_confirmation:
   warning_confirm_frames: 3
   info_confirm_frames: 3
 
-  # 预警解除: 目标离开 ROI 后延迟 N 帧解除 (防止抖动)
+  # 预警解除: 目标不在危险距离后持续 N-1 帧再解除 (防止抖动)
   release_delay_frames: 3
 
 # ---------------------------------------------------------------------------
@@ -82,21 +82,11 @@ ego_motion:
     conservative_range: 15.0  # 前后各 15m 保守预警
 
 # ---------------------------------------------------------------------------
-# ROI 区域权重 (影响预警等级计算)
+# 场地语义加权 (可选, 已废弃固定 ROI — 现为运动方向 + 距离驱动)
 # ---------------------------------------------------------------------------
-roi_zones:
-  lane_core:              # 大车道核心区 (RTG 行驶轮迹)
-    weight: 1.0           # 最高权重，直接触发危险
-    description: "大车道核心区域，RTG 轮迹"
-  lane_approach:          # 大车道近邻区 (即将闯入)
-    weight: 0.8
-    description: "紧邻大车道，即将侵入"
-  truck_lane:             # 集卡车道
-    weight: 0.6
-    description: "集卡正常通行区域，预警但降低一级"
-  side_intrusion:         # 横向入侵区 (禁行侧)
-    weight: 0.5
-    description: "禁行侧人员入侵关注区"
+# 仅 site_layout.enabled=true 时生效: 集卡车道降权, 禁行侧入侵保持关注
+# ---------------------------------------------------------------------------
+roi_zones: {}
 
 # ---------------------------------------------------------------------------
 # 预警输出规则
@@ -105,7 +95,7 @@ output_rules:
   # 同目标只输出最高等级
   deduplicate_by_highest: true
 
-  # 同类别同区域最多输出 N 个目标
+  # 同类别最多输出 N 个目标
   max_targets_per_zone:
     person: 5
     truck: 3
@@ -121,5 +111,4 @@ output_rules:
     - class_name
     - warning_level
     - distance
-    - zone
     - trigger_reason

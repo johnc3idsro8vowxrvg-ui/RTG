@@ -331,6 +331,10 @@ class ConfigLoader:
                     raise ConfigValidationError(
                         f'Extrinsic "{name}" R shape {R.shape}, expected (3,3)'
                     )
+                if T.shape not in ((3,), (3, 1)):
+                    raise ConfigValidationError(
+                        f'Extrinsic "{name}" T shape {T.shape}, expected (3,) or (3,1)'
+                    )
             else:
                 mat = np.asarray(entry, dtype=np.float64)
                 if mat.shape == (4, 4):

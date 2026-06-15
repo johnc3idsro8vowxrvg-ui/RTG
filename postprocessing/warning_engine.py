@@ -280,7 +280,7 @@ class WarningEngine:
         if level == WarningLevel.NONE:
             if hist['confirmed']:
                 hist['release_counter'] += 1
-                if hist['release_counter'] <= release_delay:
+                if hist['release_counter'] < release_delay:
                     return hist['confirmed_level']
                 # 超过释放帧数, 彻底解除
                 hist['confirmed'] = False
@@ -305,18 +305,22 @@ class WarningEngine:
         if hist['level'] == level:
             hist['frame_counter'] += 1
         else:
+            # 等级变化: 如果是降级 (DANGER→WARNING), 保留已确认状态
+            # 输出当前 (较低) 等级，不重置 confirmed= False
+            was_confirmed = hist['confirmed']
             hist['level'] = level
             hist['frame_counter'] = 1
-            hist['confirmed'] = False
+            if not was_confirmed:
+                hist['confirmed'] = False
 
         if hist['frame_counter'] >= required:
             hist['confirmed'] = True
             hist['confirmed_level'] = level
             return level
 
-        # 已确认但当前帧降级: 返回之前确认的等级
+        # 已确认但当前帧等级不同 (降级过渡): 至少输出当前 level
         if hist['confirmed']:
-            return hist['confirmed_level']
+            return min(level, hist['confirmed_level'])
 
         return WarningLevel.NONE
 
