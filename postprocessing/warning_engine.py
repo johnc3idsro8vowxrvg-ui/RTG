@@ -146,14 +146,31 @@ class WarningEngine:
 
         fwd = cfg.get('forward', 1.0)
         bwd = cfg.get('backward', 0.5)
+        lat = cfg.get('lateral', 0.8)
 
-        # 判断目标在运动方向的前方还是后方
-        # MOVING_+X: 前方 = tx > 0, 后方 = tx < 0
-        # MOVING_-X: 前方 = tx < 0, 后方 = tx > 0
+        # 获取 RTG x 包络 (ego_geometry.truck_side_assembly)
+        ego = self._ego_geom.get('ego_geometry', {})
+        truck = ego.get('truck_side_assembly', {})
+        x_min = truck.get('x_min', -12.5)
+        x_max = truck.get('x_max', 0.5)
+
+        # 判断目标在 RTG 包络外的前方还是后方
+        # MOVING_+X: 包络前方 = tx > x_max, 包络后方 = tx < x_min
+        # MOVING_-X: 包络前方 = tx < x_min, 包络后方 = tx > x_max
         if ego_state == 1:  # +x
-            return fwd if tx > 0 else bwd
+            if tx > x_max:
+                return fwd           # 前方
+            elif tx < x_min:
+                return bwd           # 后方
+            else:
+                return lat           # 在包络内部 → 侧向
         else:  # -x
-            return fwd if tx < 0 else bwd
+            if tx < x_min:
+                return fwd           # 前方
+            elif tx > x_max:
+                return bwd           # 后方
+            else:
+                return lat           # 在包络内部 → 侧向
 
     @staticmethod
     def _apply_direction_weight(level: int, weight: float) -> int:
@@ -231,7 +248,8 @@ class WarningEngine:
         close_classes = cfg.get('close_proximity_classes', ['person'])
 
         if close_enabled and class_name in close_classes and distance <= close_dist:
-            return max(level, WarningLevel.INFO)
+            # RTG 静止时的极近提示: 仅 INFO 级别 (无碰撞风险, 仅提醒)
+            return WarningLevel.INFO
 
         return WarningLevel.NONE
 
@@ -249,27 +267,39 @@ class WarningEngine:
         warn_frames = frame_conf.get('warning_confirm_frames', 3)
         release_delay = frame_conf.get('release_delay_frames', 3)
 
-        if level == WarningLevel.NONE:
-            return WarningLevel.NONE
-
         if key not in self._target_history:
             self._target_history[key] = {
                 'level': WarningLevel.NONE, 'frame_counter': 0,
-                'release_counter': 0, 'last_seen': timestamp, 'confirmed': False,
+                'release_counter': 0, 'last_seen': timestamp,
+                'confirmed': False, 'confirmed_level': WarningLevel.NONE,
             }
         hist = self._target_history[key]
         hist['last_seen'] = timestamp
 
-        # Danger: 单帧触发
+        # ---- 释放延迟: 当前 level=NONE 但之前已确认 ----
+        if level == WarningLevel.NONE:
+            if hist['confirmed']:
+                hist['release_counter'] += 1
+                if hist['release_counter'] <= release_delay:
+                    return hist['confirmed_level']
+                # 超过释放帧数, 彻底解除
+                hist['confirmed'] = False
+                hist['confirmed_level'] = WarningLevel.NONE
+                hist['release_counter'] = 0
+            return WarningLevel.NONE
+
+        hist['release_counter'] = 0
+
+        # ---- Danger: 单帧触发 ----
         if level >= WarningLevel.DANGER:
             if danger_frames <= 1:
                 hist['level'] = level
                 hist['confirmed'] = True
+                hist['confirmed_level'] = level
                 hist['frame_counter'] = 1
-                hist['release_counter'] = 0
                 return WarningLevel.DANGER
 
-        # Warning/Info: 多帧确认
+        # ---- Warning/Info: 多帧确认 ----
         required = warn_frames if level == WarningLevel.WARNING else frame_conf.get('info_confirm_frames', 3)
 
         if hist['level'] == level:
@@ -279,14 +309,14 @@ class WarningEngine:
             hist['frame_counter'] = 1
             hist['confirmed'] = False
 
-        if hist['confirmed']:
-            hist['release_counter'] = 0
-            return min(level, hist['level'])
-
         if hist['frame_counter'] >= required:
             hist['confirmed'] = True
-            hist['release_counter'] = 0
+            hist['confirmed_level'] = level
             return level
+
+        # 已确认但当前帧降级: 返回之前确认的等级
+        if hist['confirmed']:
+            return hist['confirmed_level']
 
         return WarningLevel.NONE
 

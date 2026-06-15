@@ -549,6 +549,7 @@ class RTGBEVNode:
                 continue
 
             # L2 → L1/BEV 坐标变换
+            filter_lidar_id = lidar_id
             if lidar_id == 2:
                 N = pts.shape[0]
                 pts_xyz = pts[:, :3]
@@ -556,11 +557,12 @@ class RTGBEVNode:
                 pts_h = np.hstack([pts_xyz, ones])
                 pts_xyz_t = (T_l2_to_l1 @ pts_h.T).T[:, :3]
                 pts[:, :3] = pts_xyz_t
+                filter_lidar_id = 1  # 已变换到BEV，用L1偏移(即不加偏移)
 
-            # 自车 footprint 过滤 (各雷达独立过滤)
+            # 自车 footprint 过滤
             if self._footprint_filter is not None and \
                self._footprint_filter.has_footprint:
-                pts = self._footprint_filter.filter(pts, lidar_id=lidar_id)
+                pts = self._footprint_filter.filter(pts, lidar_id=filter_lidar_id)
 
             if len(pts) > 0:
                 merged_parts.append(pts)

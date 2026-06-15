@@ -55,8 +55,8 @@ lidars:
     frequency: 10 Hz
     points_per_frame: 262144
     fields: [x, y, z, t, ring, range, reflectivity, near_ir]
-    tf_translation: { x: 12.0, y: 0.0, z: 1.5 }
-    bev_translation: { x: 12.0, y: 0.0, z: 1.5 }
+    tf_translation: { x: -12.0, y: 0.0, z: 1.5 }
+    bev_translation: { x: -12.0, y: 0.0, z: 1.5 }
     rpy: { roll: 0.0, pitch: 0.0, yaw: -0.82 }  # 集装箱边缘分析 + RViz
     estimation_method: container_edge_analysis
     estimation_date: 2026-06-04
@@ -120,8 +120,8 @@ cameras:
     resolution: [1080, 1920]
     encoding: bgr8
     frequency: 10 Hz
-    tf_translation: { x: -0.1, y: -12.0, z: 4.0 }
-    bev_translation: { x: 12.0, y: -0.1, z: 4.0 }
+    tf_translation: { x: -12.0, y: -0.1, z: 4.0 }
+    bev_translation: { x: -12.0, y: -0.1, z: 4.0 }
     # 朝向 -x: camera +z→world -x, camera +y→world +y, camera +x→world +z
     orientation: R_y(-90°)
     synthetic_intrinsic:

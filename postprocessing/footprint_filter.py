@@ -69,7 +69,7 @@ class SelfFootprintFilter:
     # ------------------------------------------------------------------
 
     def _load(self, path: str):
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             geom = yaml.safe_load(f)
 
         # 优先新格式: ego_geometry
@@ -99,7 +99,6 @@ class SelfFootprintFilter:
                             f'y=[{y_min},{y_max}]')
 
             if self._zones:
-                self.has_footprint = True
                 return
 
         # 旧格式 fallback: ego_footprint = {truck_lane_side: {front_leg: {x,y}, ...}, ...}

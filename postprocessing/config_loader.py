@@ -321,20 +321,28 @@ class ConfigLoader:
             logger.warning('Sync window %.3f is non-positive', sync_win)
 
     @staticmethod
-    def _validate_transform_matrix(name: str, matrix) -> None:
-        """验证一个 4×4 变换矩阵是否合理。"""
+    def _validate_transform_matrix(name: str, entry) -> None:
+        """验证外参矩阵是否合理。兼容 {R, T} dict 和 4x4 数组格式。"""
         try:
-            mat = np.asarray(matrix, dtype=np.float64)
-        except (ValueError, TypeError):
+            if isinstance(entry, dict) and 'R' in entry and 'T' in entry:
+                R = np.asarray(entry['R'], dtype=np.float64)
+                T = np.asarray(entry['T'], dtype=np.float64)
+                if R.shape != (3, 3):
+                    raise ConfigValidationError(
+                        f'Extrinsic "{name}" R shape {R.shape}, expected (3,3)'
+                    )
+            else:
+                mat = np.asarray(entry, dtype=np.float64)
+                if mat.shape == (4, 4):
+                    R, T = mat[:3, :3], mat[:3, 3]
+                else:
+                    raise ConfigValidationError(
+                        f'Extrinsic "{name}" shape {mat.shape}, expected (4,4) or {{R,T}}'
+                    )
+        except (ValueError, TypeError) as e:
             raise ConfigValidationError(
-                f'Extrinsic "{name}" cannot be parsed as matrix'
+                f'Extrinsic "{name}" cannot be parsed: {e}'
             )
-        if mat.shape != (4, 4):
-            raise ConfigValidationError(
-                f'Extrinsic "{name}" shape {mat.shape}, expected (4,4)'
-            )
-        # 检查旋转部分的行列式
-        R = mat[:3, :3]
         det = np.linalg.det(R)
         if abs(det) < 1e-6:
             raise ConfigValidationError(
