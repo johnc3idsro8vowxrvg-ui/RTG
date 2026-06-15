@@ -61,8 +61,9 @@ lidars:
     estimation_method: container_edge_analysis
     estimation_date: 2026-06-04
 
-  
-  L3:  frame_id: lidar_03_front
+
+  L3:
+    frame_id: lidar_03_front
     location: 禁行侧前支腿
     model: RoboSense 32线
     frequency: 10 Hz
