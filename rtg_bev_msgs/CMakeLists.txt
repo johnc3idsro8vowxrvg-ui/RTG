@@ -19,6 +19,12 @@ add_message_files(
   EgoMotionState.msg
 )
 
+# Generate services
+add_service_files(
+  FILES
+  SetWarningParam.srv
+)
+
 generate_messages(
   DEPENDENCIES
   std_msgs

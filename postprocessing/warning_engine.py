@@ -19,31 +19,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .constants import WarningLevel, ROIZone
+
 logger = logging.getLogger(__name__)
-
-
-# ==============================================================================
-# 常量
-# ==============================================================================
-class WarningLevel:
-    NONE = 0
-    INFO = 1
-    WARNING = 2
-    DANGER = 3
-
-    _names = {0: 'none', 1: 'info', 2: 'warning', 3: 'danger'}
-
-    @classmethod
-    def name(cls, level: int) -> str:
-        return cls._names.get(level, 'unknown')
-
-
-# ROI 区域名称常量
-class ROIZone:
-    LANE_CORE = 'lane_core'
-    LANE_APPROACH = 'lane_approach'
-    TRUCK_LANE = 'truck_lane'
-    SIDE_INTRUSION = 'side_intrusion'
 
 
 # 触发原因常量
@@ -341,14 +319,15 @@ class WarningEngine:
         if weight >= 1.0:
             return level
 
-        # 权重 < 1.0: 降一级
-        if weight >= 0.7:
-            # lane_approach (0.8): 非 danger 降一级
-            if level == WarningLevel.DANGER:
-                return WarningLevel.DANGER
+        # danger 在任何区域保持 danger (安全优先)
+        if level == WarningLevel.DANGER:
+            return WarningLevel.DANGER
+
+        # weight 0.5~0.9: 降一级 (truck_lane=0.6, side_intrusion=0.5, lane_approach=0.8)
+        if weight >= 0.5:
             return max(WarningLevel.INFO, level - 1)
 
-        # 低权重 (0.5~0.6): 降两级 (最少 INFO)
+        # 极低权重 (<0.5): 降两级 (最少 INFO)
         return max(WarningLevel.INFO, level - 2)
 
     # ------------------------------------------------------------------

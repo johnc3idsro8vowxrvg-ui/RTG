@@ -27,15 +27,7 @@ except ImportError:
     logger.info('filterpy not installed; using simple motion-model fallback')
 
 
-# ==============================================================================
-# 常量
-# ==============================================================================
-class _StateConst:
-    CANDIDATE = 0
-    CONFIRMED = 1
-    LOST = 2
-    DELETED = 3
-
+from .constants import TrackerState as _StateConst
 
 _STATE_NAMES = {0: 'candidate', 1: 'confirmed', 2: 'lost', 3: 'deleted'}
 
@@ -84,29 +76,24 @@ class KalmanBoxTracker:
     # ------------------------------------------------------------------
     # Predict
     # ------------------------------------------------------------------
-    def predict(self) -> np.ndarray:
-        """执行卡尔曼预测步。返回预测后的状态估计 (10,)。"""
-        self.age += 1
-        self.time_since_update += 1
-
-        if self.kf is not None:
-            self.kf.predict()
-            self._x_hat = self.kf.x.copy()
-        else:
-            # 降级: 恒定速度外推
-            dt = 0.05  # 假设 ~20Hz, 将在外部覆盖
-            self._x_hat[0] += self._x_hat[7] * dt
-            self._x_hat[1] += self._x_hat[8] * dt
-            self._x_hat[2] += self._x_hat[9] * dt
-        return self._x_hat
-
     def predict_with_dt(self, dt: float) -> np.ndarray:
         """使用指定时间步长预测。"""
         self.age += 1
         self.time_since_update += 1
-        self._x_hat[0] += self._x_hat[7] * dt
-        self._x_hat[1] += self._x_hat[8] * dt
-        self._x_hat[2] += self._x_hat[9] * dt
+
+        dt = max(dt, 1e-4)
+        if self.kf is not None:
+            # 按实际 dt 更新状态转移矩阵中的速度项
+            self.kf.F[0, 7] = dt
+            self.kf.F[1, 8] = dt
+            self.kf.F[2, 9] = dt
+            self.kf.predict()
+            self._x_hat = self.kf.x.copy()
+        else:
+            # 降级: 恒定速度外推
+            self._x_hat[0] += self._x_hat[7] * dt
+            self._x_hat[1] += self._x_hat[8] * dt
+            self._x_hat[2] += self._x_hat[9] * dt
         return self._x_hat
 
     # ------------------------------------------------------------------
@@ -137,12 +124,14 @@ class KalmanBoxTracker:
             self.kf.update(bbox.reshape(-1, 1))
             self._x_hat = self.kf.x.copy()
         else:
-            # 降级: 简单指数平滑
+            # 降级: 简单指数平滑 + 有限差速度估计
+            # 注意: 必须在覆盖位置前保存旧值，否则速度永远≈0
+            old_x, old_y = self._x_hat[0], self._x_hat[1]
             alpha = 0.7
             self._x_hat[:7] = alpha * bbox + (1 - alpha) * self._x_hat[:7]
-            # 更新速度估计
-            self._x_hat[7] = (bbox[0] - self._x_hat[0]) / max(self.time_since_update or 1, 1)
-            self._x_hat[8] = (bbox[1] - self._x_hat[1]) / max(self.time_since_update or 1, 1)
+            dt_v = max(self.time_since_update or 1, 1)
+            self._x_hat[7] = (bbox[0] - old_x) / dt_v
+            self._x_hat[8] = (bbox[1] - old_y) / dt_v
 
         # 状态机晋升
         if self.state == _StateConst.CANDIDATE and self.hits >= 3:
@@ -204,12 +193,8 @@ class KalmanBoxTracker:
         """构造恒定速度 Kalman Filter (状态10维, 观测7维)。"""
         kf = _FKF(dim_x=_DIM_X, dim_z=_DIM_Z)
 
-        # 状态转移矩阵 (dt=1 归一化, 外部 predict_with_dt 调整)
-        dt = 1.0
+        # 状态转移矩阵 (dt 在 predict_with_dt 中按实际帧间隔更新)
         kf.F = np.eye(_DIM_X)
-        kf.F[0, 7] = dt
-        kf.F[1, 8] = dt
-        kf.F[2, 9] = dt
 
         # 观测矩阵: 只观测 [x,y,z,w,l,h,yaw]
         kf.H = np.zeros((_DIM_Z, _DIM_X))

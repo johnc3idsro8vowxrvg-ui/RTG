@@ -357,12 +357,17 @@ class RTGBEVNode:
             logger.warning('Could not create reload_warning_config service')
 
         try:
-            rospy.Service(
-                '/rtg_bev/set_warning_param',
-                _make_set_param_srv() if _make_set_param_srv() is not None else None,
-                self._handle_set_warning_param,
-            )
-            logger.info('Service: /rtg_bev/set_warning_param')
+            srv_type = _make_set_param_srv()
+            if srv_type is not None:
+                rospy.Service(
+                    '/rtg_bev/set_warning_param',
+                    srv_type,
+                    self._handle_set_warning_param,
+                )
+                logger.info('Service: /rtg_bev/set_warning_param')
+            else:
+                logger.warning('set_warning_param service not available '
+                               '(rtg_bev_msgs.srv not built)')
         except Exception:
             logger.warning('Could not create set_warning_param service')
 
@@ -402,7 +407,6 @@ class RTGBEVNode:
         try:
             key = getattr(req, 'key', '')
             value_str = getattr(req, 'value', '')
-            # 尝试类型转换
             try:
                 value = float(value_str)
             except ValueError:
@@ -410,13 +414,19 @@ class RTGBEVNode:
             success = self._config.set_warning_param(key, value)
             logger.info('set_warning_param %s=%s → %s', key, value_str, success)
             if ROS_AVAILABLE:
-                from std_srvs.srv import EmptyResponse
-                return EmptyResponse()
+                from rtg_bev_msgs.srv import SetWarningParamResponse
+                return SetWarningParamResponse(
+                    success=success,
+                    message=f'{key}={value_str}' if success else f'failed: {key}'
+                )
         except Exception as e:
             logger.error('Failed to set warning param: %s', e)
+            if ROS_AVAILABLE:
+                from rtg_bev_msgs.srv import SetWarningParamResponse
+                return SetWarningParamResponse(success=False, message=str(e))
         if ROS_AVAILABLE:
-            from std_srvs.srv import EmptyResponse
-            return EmptyResponse()
+            from rtg_bev_msgs.srv import SetWarningParamResponse
+            return SetWarningParamResponse(success=False, message='ROS not available')
 
     # ------------------------------------------------------------------
     # 主处理循环
@@ -826,10 +836,8 @@ class RTGBEVNode:
                 self._diagnostics.log_diagnostics()
                 self._last_diag_time = now
 
-            # 清理旧传感器数据
-            cutoff = time.time() - 1.0
-            if ROS_AVAILABLE:
-                cutoff = rospy.get_time() - 1.0
+            # 清理旧传感器数据 (ROS 环境用 sim time, 否则用 wall time)
+            cutoff = (rospy.get_time() if ROS_AVAILABLE else time.time()) - 1.0
             self._sensor_buffer.clear_old(cutoff)
 
             rate.sleep()
@@ -945,15 +953,13 @@ def _import_or_none(module: str, attr: str) -> Optional[type]:
 
 
 def _make_set_param_srv():
-    """构造 SetWarningParam service 类型。"""
+    """返回 SetWarningParam service 类型，不可用时返回 None。"""
     if not ROS_AVAILABLE:
         return None
     try:
-        from rospy.service import ServiceDefinition
-        from std_srvs.srv import EmptyResponse
-        # 尝试动态创建，或使用默认 handler
-        return None  # 简化: set_param 使用 Empty srv type
-    except Exception:
+        from rtg_bev_msgs.srv import SetWarningParam
+        return SetWarningParam
+    except ImportError:
         return None
 
 

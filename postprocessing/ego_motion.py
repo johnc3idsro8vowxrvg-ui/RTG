@@ -31,21 +31,7 @@ except ImportError:
     )
 
 
-# ==============================================================================
-# 常量
-# ==============================================================================
-class EgoMotionState:
-    STATIC = 0
-    MOVING_PLUS_X = 1
-    MOVING_MINUS_X = 2
-    UNKNOWN = 3
-
-    _names = {0: 'static', 1: 'moving_+x', 2: 'moving_-x', 3: 'unknown'}
-
-    @classmethod
-    def name(cls, state: int) -> str:
-        return cls._names.get(state, 'unknown')
-
+from .constants import EgoMotionState
 
 # ==============================================================================
 # EGO MOTION ESTIMATOR
@@ -177,16 +163,17 @@ class EgoMotionEstimator:
             dx = 0.0
             fitness = 0.0
 
+        # 更新位移窗口 (保存旧时间戳用于 dt 计算)
+        prev_ts = self._prev_timestamp
+        dt = 0.05
+        if prev_ts is not None:
+            dt_actual = timestamp - prev_ts
+            if dt_actual > 0:
+                dt = dt_actual
+
         # 存储当前帧作为"上一帧"
         self._prev_static_cloud = static_points.copy()
         self._prev_timestamp = timestamp
-
-        # 更新位移窗口
-        dt = 0.05
-        if self._prev_timestamp is not None:
-            dt_actual = timestamp - self._prev_timestamp
-            if dt_actual > 0:
-                dt = dt_actual
         self._update_displacement_window(timestamp, dx)
 
         # 判断运动状态

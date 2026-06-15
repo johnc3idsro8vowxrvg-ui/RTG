@@ -217,16 +217,21 @@ class ConfigLoader:
         """验证标定参数。"""
         calib = self._calib
 
-        # 验证相机内参
+        # 验证相机内参 (兼容 list [fx,fy,cx,cy] 和 dict {fx:..., fy:...} 格式)
         cameras = calib.get('cameras', {})
         for cam_name, cam_data in cameras.items():
-            intrinsic = cam_data.get('intrinsic')
-            if intrinsic:
+            intrinsic = cam_data.get('intrinsic') or cam_data.get('synthetic_intrinsic')
+            if intrinsic is None:
+                continue
+            if isinstance(intrinsic, dict):
+                fx = intrinsic.get('fx', 0)
+                fy = intrinsic.get('fy', 0)
+            else:
                 fx, fy = intrinsic[0], intrinsic[1]
-                if fx <= 0 or fy <= 0:
-                    raise ConfigValidationError(
-                        f'Invalid intrinsic for {cam_name}: fx={fx}, fy={fy}'
-                    )
+            if fx <= 0 or fy <= 0:
+                raise ConfigValidationError(
+                    f'Invalid intrinsic for {cam_name}: fx={fx}, fy={fy}'
+                )
 
         # 验证外参矩阵（如有）
         extrinsics = calib.get('extrinsics', {})
