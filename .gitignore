@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+
+# Output / visualizations / logs
+output/
+logs/
+
+# Large binary files (models, datasets, rosbags)
+*.onnx
+*.pth
+*.pkl
+*.bin
+*.bag
+
+# CUDA-CenterPoint build
+CUDA-CenterPoint/build/
+
+# Per-machine config (keep calib_from_bag/calib_synthetic/warning.yaml)
+config/calib.yaml
+config/geometry.yaml
+config/system.yaml

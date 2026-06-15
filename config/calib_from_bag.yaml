@@ -1,0 +1,230 @@
+# =============================================================================
+# calib_from_bag.yaml — RTG 传感器外参 (Bag 估计, 2026-06-11)
+# =============================================================================
+# 来源: lidar_and_camera_2026-05-19-15-44-34.bag (14.5 GB, 51.7s)
+# 方法:
+#   - L1/L2 yaw: 集装箱边缘分析 (2026-06-04) + RViz 视觉对齐
+#   - L3/L4 RPY: RViz 交互式视觉对齐 (2026-06-11)
+#   - 平移: geometry.yaml 设计值, 经点云拼接验证
+#   - 相机: geometry.yaml 设计位置 + R_y(±90°) 朝向
+# 注意: 此为合成/视觉估计值, 不可用于精度评估。
+#       真实标定参数需由标定团队提供后替换。
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 坐标系说明
+# ---------------------------------------------------------------------------
+# BEV 坐标系 (车体):
+#   原点: L1 (集卡侧前雷达) 地面投影
+#   +x:   大车道方向 (C1 朝向)
+#   +y:   跨距方向 (禁行侧 → 集卡侧), 与 ROS 惯例一致 (+y = left)
+#   +z:   竖直向上
+#
+# TF 坐标系 (ROS TF tree, _tf_republisher.py):
+#   BEV 与 ROS 坐标系直接对齐 (无需轴交换)
+#   BEV +y 指向 ROS +y (left)
+#   RViz 顶视图需 R_z(-90°) 使大车道沿屏幕展开
+#
+# 旋转约定: RPY (roll, pitch, yaw), XYZ 内旋顺序, 单位度
+#   roll  = 绕 X 轴旋转
+#   pitch = 绕 Y 轴旋转
+#   yaw   = 绕 Z 轴旋转
+
+# ===========================================================================
+# 激光雷达外参
+# ===========================================================================
+lidars:
+  L1:
+    frame_id: lidar_01_front
+    location: 集卡侧前支腿
+    model: Ouster OS1 128线
+    frequency: 10 Hz
+    points_per_frame: 262144
+    fields: [x, y, z, t, ring, range, reflectivity, near_ir]
+    # TF 坐标 (BEV 原点)
+    tf_translation: { x: 0.0, y: 0.0, z: 1.5 }
+    bev_translation: { x: 0.0, y: 0.0, z: 1.5 }
+    rpy: { roll: 0.0, pitch: 0.0, yaw: 4.62 }   # 集装箱边缘分析 + RViz
+    estimation_method: container_edge_analysis
+    estimation_date: 2026-06-04
+
+  L2:
+    frame_id: lidar_02_rear
+    location: 集卡侧后支腿
+    model: Ouster OS1 128线
+    frequency: 10 Hz
+    points_per_frame: 262144
+    fields: [x, y, z, t, ring, range, reflectivity, near_ir]
+    tf_translation: { x: 0.0, y: -12.0, z: 1.5 }
+    bev_translation: { x: 12.0, y: 0.0, z: 1.5 }
+    rpy: { roll: 0.0, pitch: 0.0, yaw: -0.82 }  # 集装箱边缘分析 + RViz
+    estimation_method: container_edge_analysis
+    estimation_date: 2026-06-04
+
+  
+  L3:  frame_id: lidar_03_front
+    location: 禁行侧前支腿
+    model: RoboSense 32线
+    frequency: 10 Hz
+    points_per_frame: ~17000
+    fields: [x, y, z, intensity]
+    # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
+    tf_translation: { x: -23.5, y: 0.0, z: 1.5 }
+    bev_translation: { x: 0.0, y: -23.5, z: 1.5 }
+    rpy: { roll: 90.0, pitch: 6.0, yaw: 90.0 }   # RViz 视觉对齐
+    estimation_method: rviz_visual_alignment
+    estimation_date: 2026-06-11
+
+  L4:
+    frame_id: lidar_04_rear
+    location: 禁行侧后支腿
+    model: RoboSense 32线
+    frequency: 10 Hz
+    points_per_frame: ~18000
+    fields: [x, y, z, intensity]
+    # 注: RoboSense 旋转90°安装 (垂直360°, 水平~70°沿大车道)
+    tf_translation: { x: -23.5, y: -12.0, z: 1.5 }
+    bev_translation: { x: 12.0, y: -23.5, z: 1.5 }
+    rpy: { roll: 96.0, pitch: 2.0, yaw: -90.0 }   # RViz 视觉对齐
+    estimation_method: rviz_visual_alignment
+    estimation_date: 2026-06-11
+
+# ===========================================================================
+# 相机外参 (设计值 + 合成内参)
+# ===========================================================================
+cameras:
+  C1:
+    frame_id: camera_01
+    location: 集卡侧前支腿
+    model: 海康 DS-2XC64ZZY-SHZJ-4mm
+    resolution: [1080, 1920]  # 竖屏 (height, width)
+    encoding: bgr8
+    frequency: 10 Hz
+    tf_translation: { x: 0.0, y: 0.0, z: 4.0 }
+    bev_translation: { x: 0.0, y: 0.0, z: 4.0 }
+    # 朝向 +x: camera +z→world +x, camera +y→world +y, camera +x→world -z
+    orientation: R_y(+90°)
+    synthetic_intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+    hfov: 87.6   # 沿 x 纵深+高度方向 (相机竖屏的 height 方向)
+    vfov: 46.0   # 沿 y 跨距方向 (相机竖屏的 width 方向)
+
+  C2:
+    frame_id: camera_02
+    location: 集卡侧后支腿
+    model: 海康 DS-2XC64ZZY-SHZJ-4mm
+    resolution: [1080, 1920]
+    encoding: bgr8
+    frequency: 10 Hz
+    tf_translation: { x: -0.1, y: -12.0, z: 4.0 }
+    bev_translation: { x: 12.0, y: -0.1, z: 4.0 }
+    # 朝向 -x: camera +z→world -x, camera +y→world +y, camera +x→world +z
+    orientation: R_y(-90°)
+    synthetic_intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+
+  C3:
+    frame_id: camera_03
+    location: 禁行侧前支腿
+    model: 海康 DS-2XC64ZZY-SHZJ-4mm
+    resolution: [1080, 1920]
+    encoding: bgr8
+    frequency: 10 Hz
+    tf_translation: { x: -23.5, y: 0.0, z: 4.0 }
+    bev_translation: { x: 0.0, y: -23.5, z: 4.0 }
+    orientation: R_y(+90°)
+    synthetic_intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+
+  C4:
+    frame_id: camera_04
+    location: 禁行侧后支腿
+    model: 海康 DS-2XC64ZZY-SHZJ-4mm
+    resolution: [1080, 1920]
+    encoding: bgr8
+    frequency: 10 Hz
+    tf_translation: { x: -23.4, y: -12.0, z: 4.0 }
+    bev_translation: { x: 12.0, y: -23.4, z: 4.0 }
+    orientation: R_y(-90°)
+    synthetic_intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+
+# ===========================================================================
+# 外参链 (用于点云拼接、多模态融合)
+# ===========================================================================
+extrinsics:
+  # L2 → L1: 双雷达点云拼接 (纯平移, 无需额外旋转)
+  LIDAR_RE_to_LIDAR_FR:
+    R: [[1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0]]
+    T: [-12.0, 0.0, 0.0]   # L2 在 BEV 中 x=-12.0m, 同朝向纯平移
+    note: "L2→L1 拼接: 两雷达在同一朝向, 纯平移 (BEV 与 TF 坐标系已对齐)"
+
+  # 相机→雷达 (合成值, 基于 4m-1.5m=2.5m 垂直偏移)
+  CAM_FR_to_LIDAR_FR:
+    R: [[0.0,  0.0,  1.0],
+        [0.0,  1.0,  0.0],
+        [-1.0, 0.0,  0.0]]    # R_y(90°): camera→liDAR 对齐
+    T: [0.0, 2.5, 0.0]        # z 方向 2.5m (相机4m - 雷达1.5m)
+    note: "合成值, 待标定团队替换"
+
+  CAM_RE_to_LIDAR_RE:
+    R: [[0.0,  0.0, -1.0],
+        [0.0,  1.0,  0.0],
+        [1.0,  0.0,  0.0]]    # R_y(-90°)
+    T: [0.0, 2.5, 0.0]
+    note: "合成值, 待标定团队替换"
+
+# ===========================================================================
+# 估计方法说明
+# ===========================================================================
+estimation_methods:
+  container_edge_analysis:
+    description: "利用集装箱排列整齐的几何先验——集装箱边缘应为直线, 且与车道方向平行/垂直。在点云中提取集装箱边缘线方向, 与理论方向对比, 反推雷达 yaw 偏差。"
+    accuracy: "±0.5° (估计)"
+    applicable_to: [L1, L2]
+
+  rviz_visual_alignment:
+    description: "在 RViz 3D 视图中同时显示 L1/L2 (已标定) 和 L3/L4 点云, 交互式调整 roll/pitch/yaw 直到点云对齐。利用堆场固定结构(集装箱堆、地面、车道边界)作为几何参考。"
+    accuracy: "±2° (估计, 定性判断)"
+    applicable_to: [L3, L4]
+
+  synthetic:
+    description: "基于传感器规格和机械设计值反推, 用于 Pipeline 验证, 不可用于精度评估。"
+    applicable_to: [C1, C2, C3, C4]
+
+# ===========================================================================
+# 待替换项 — 标定团队交付后替换以下值
+# ===========================================================================
+todo_replace:
+  - "所有相机真实内参 (当前为 FOV 规格反推值)"
+  - "C1→L1 真实外参 (当前为 2.5m 垂直偏移合成值)"
+  - "C2→L2 真实外参 (同上)"
+  - "L2→L1 真实外参 (当前为设计轮组间距 12.0m)"
+  - "L3/L4 所有外参 (当前为 RViz 视觉估计, 需精确标定)"
+  - "所有传感器→车体坐标系 外参"
+  - "时间同步精度验证"
+  - "相机→地面外参验证 (C6)"
+  - "雷达扫描平面水平约束 (C7)"
+
+# ===========================================================================
+# 变更记录
+# ===========================================================================
+# 2026-06-11: 初始版本 — 从 bag 数据估计
+#   - L1/L2 yaw: 集装箱边缘分析 (2026-06-04)
+#   - L3/L4 RPY: RViz 视觉对齐 (2026-06-11)
+#   - 平移: geometry.yaml 设计值
+# ===========================================================================

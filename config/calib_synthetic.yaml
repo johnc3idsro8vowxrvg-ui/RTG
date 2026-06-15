@@ -1,0 +1,94 @@
+# =============================================================================
+# calib_synthetic.yaml — RTG 合成标定参数 (2026-05-20 修正版)
+# =============================================================================
+# 用途: Pipeline 验证用合成标定 (不可用于精度评估)
+# 修正: 相机朝向从 ±y 修正为 ±x (大车道方向)
+#   C1/C3 朝 +x:  camera +z → world +x,  camera +y → world +y(87.6°HFOV), camera +x → world -z(46°VFOV)
+#   C2/C4 朝 -x:  camera +z → world -x,  camera +y → world +y(87.6°HFOV), camera +x → world +z(46°VFOV)
+#   R 约定: v_lidar = R @ v_cam  (camera → lidar rotation, R = R_y(±90°))
+#   T 约定: lidar 原点在 camera 坐标系下的位置 (meters)
+# =============================================================================
+
+sensors:
+  CAM_FR:
+    type: camera
+    location: front_truck_lane_leg
+    intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+    distortion:
+      model: opencv_radial_tangential
+      coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+    resolution: [1080, 1920]
+
+  CAM_RE:
+    type: camera
+    location: rear_truck_lane_leg
+    intrinsic:
+      fx: 1272.2
+      fy: 1001.1
+      cx: 540.0
+      cy: 960.0
+    distortion:
+      model: opencv_radial_tangential
+      coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+    resolution: [1080, 1920]
+
+  LIDAR_FR:
+    type: lidar
+    location: front_truck_lane_leg
+    frequency: 10
+    lines: 128
+
+  LIDAR_RE:
+    type: lidar
+    location: rear_truck_lane_leg
+    frequency: 10
+    lines: 128
+
+extrinsics:
+  # C1→L1: 相机朝 +x (R_y(90°)), 平移 (0, 2.5, 0) = lidar 在相机正下方 2.5m
+  CAM_FR_to_LIDAR_FR:
+    R: [[ 0.0,  0.0,  1.0],
+        [ 0.0,  1.0,  0.0],
+        [-1.0,  0.0,  0.0]]
+    T: [0.0, 2.5, 0.0]
+
+  # C2→L2: 相机朝 -x (R_y(-90°)), 平移同上
+  CAM_RE_to_LIDAR_RE:
+    R: [[ 0.0,  0.0, -1.0],
+        [ 0.0,  1.0,  0.0],
+        [ 1.0,  0.0,  0.0]]
+    T: [0.0, 2.5, 0.0]
+
+  # L2→L1: 雷达拼接 (Δx = -12.0m)
+  LIDAR_RE_to_LIDAR_FR:
+    R: [[1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0]]
+    T: [-12.0, 0.0, 0.0]
+
+  # LiDAR→BASE
+  LIDAR_FR_to_BASE:
+    R: [[1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0]]
+    T: [0.0, 0.0, -1.5]
+
+  LIDAR_RE_to_BASE:
+    R: [[1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0]]
+    T: [-12.0, 0.0, -1.5]
+
+ego_footprint:
+  truck_lane_side:
+    front_leg: [0.0, 0.0]
+    rear_leg: [-12.0, 0.0]
+    leg_width: 1.0
+  forbidden_side:
+    front_leg: [0.0, -23.5]
+    rear_leg: [-12.0, -23.5]
+    leg_width: 1.0

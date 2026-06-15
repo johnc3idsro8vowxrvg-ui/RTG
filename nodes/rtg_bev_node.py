@@ -1,0 +1,1099 @@
+#!/usr/bin/env python
+"""
+RTG BEV 防撞系统主节点 — rtg_bev_node.py
+
+ROS1 主节点骨架 (基于 rospy):
+  - 订阅: 2相机 + 2雷达 topic（按 system.yaml 配置）
+  - 同步器: 时间戳对齐（50ms 窗口）
+  - 推理调用（CenterPoint LiDAR-only 推理接口）
+  - 发布: detections/tracks/warnings/ego_motion/diagnostics
+  - 配置加载: 启动时读取所有 YAML 配置文件
+  - 诊断信息: 传感器帧率、时间戳异常、标定文件状态
+
+依赖:
+  - rospy (可选, try/except 优雅降级)
+  - sensor_msgs, diagnostic_msgs (ROS1 标准)
+  - rtg_bev_msgs (本项目的自定义消息包)
+"""
+
+import argparse
+import os
+import sys
+import time
+import logging
+import traceback
+from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+# torch 可选导入（推理时使用）
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    HAS_TORCH = False
+
+# ---------------------------------------------------------------------------
+# 尝试导入 ROS1 依赖 (优雅降级)
+# ---------------------------------------------------------------------------
+ROS_AVAILABLE = False
+try:
+    import rospy
+    ROS_AVAILABLE = True
+except ImportError:
+    rospy = None
+    print('[rtg_bev_node] rospy not available; running in standalone/offline mode')
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+# 项目内部模块 (相对于项目根目录)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from postprocessing.config_loader import ConfigLoader, ConfigError
+from postprocessing.footprint_filter import SelfFootprintFilter
+from postprocessing.tracker import Tracker
+from postprocessing.ego_motion import EgoMotionEstimator, EgoMotionState
+from postprocessing.warning_engine import WarningEngine
+
+# ── 类别映射 (模型输出 → 跟踪器输入) ──────────────────────────────────
+NUSC_CLASSES = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+    'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone',
+]
+NUSC_TO_RTG_CLASS = {
+    'pedestrian': 'person', 'truck': 'truck', 'car': 'car',
+    'trailer': 'truck', 'bus': 'other_obstacle',
+    'construction_vehicle': 'other_obstacle', 'motorcycle': 'car',
+    'bicycle': 'other_obstacle', 'traffic_cone': 'other_obstacle',
+    'barrier': 'other_obstacle',
+}
+RTG_CLASS_NAME_TO_ID = {
+    'person': 0, 'truck': 1, 'car': 2, 'other_obstacle': 3,
+}
+
+logger = logging.getLogger('rtg_bev_node')
+
+
+# ==============================================================================
+# SENSOR BUFFER
+# ==============================================================================
+class SensorBuffer:
+    """环形缓冲区，缓存最近 N 条传感器消息用于时间戳同步。"""
+
+    def __init__(self, maxlen: int = 10):
+        self._buffer = deque(maxlen=maxlen)
+
+    def add(self, msg, ts: float, sensor_key: str) -> None:
+        self._buffer.append({
+            'msg': msg,
+            'timestamp': ts,
+            'sensor': sensor_key,
+        })
+
+    def get_synced_frame(self, window: float = 0.05) -> Optional[Dict[str, Any]]:
+        """查找一组时间窗口内对齐的传感器消息。
+
+        Parameters
+        ----------
+        window : float
+            时间容忍窗口 (秒)。
+
+        Returns
+        -------
+        frame : dict or None
+            {camera_01: msg, camera_02: msg, lidar_01: msg, lidar_02: msg, timestamp: float}
+        """
+        if len(self._buffer) < 4:
+            return None
+
+        # 倒序查找: 从最新消息向前找匹配组
+        buffer_list = list(self._buffer)
+        for i in range(len(buffer_list) - 1, -1, -1):
+            anchor = buffer_list[i]
+            anchor_ts = anchor['timestamp']
+            group = {anchor['sensor']: anchor['msg']}
+
+            for j in range(len(buffer_list)):
+                if j == i:
+                    continue
+                entry = buffer_list[j]
+                if abs(entry['timestamp'] - anchor_ts) <= window:
+                    if entry['sensor'] not in group:
+                        group[entry['sensor']] = entry['msg']
+
+            # 需要至少包含 camera_01 + lidar_01 (核心传感器)
+            if 'camera_01' in group and 'lidar_01' in group:
+                return {
+                    **group,
+                    'timestamp': anchor_ts,
+                }
+
+        return None
+
+    def clear_old(self, before_ts: float) -> int:
+        """清除时间戳早于 before_ts 的条目。返回清除数量。"""
+        before = len(self._buffer)
+        while self._buffer and self._buffer[0]['timestamp'] < before_ts:
+            self._buffer.popleft()
+        return before - len(self._buffer)
+
+
+# ==============================================================================
+# DIAGNOSTICS
+# ==============================================================================
+class DiagnosticsCollector:
+    """诊断信息收集器。
+
+    采集传感器帧率、推理延迟、时间戳异常等，仅记录日志不实时告警。
+    """
+
+    def __init__(self):
+        # 帧率统计: {sensor_key: deque of timestamps}
+        self._frame_times: Dict[str, deque] = {}
+        self._last_inference_latency = 0.0
+        self._output_frame_count = 0
+        self._start_time = time.time()
+        self._sensor_anomalies: List[str] = []
+        self._calib_status = 'unknown'
+
+    def record_sensor_frame(self, sensor_key: str, timestamp: float) -> None:
+        """记录一帧传感器数据。"""
+        if sensor_key not in self._frame_times:
+            self._frame_times[sensor_key] = deque(maxlen=100)
+        self._frame_times[sensor_key].append(timestamp)
+
+    def record_inference(self, latency_ms: float) -> None:
+        self._last_inference_latency = latency_ms
+
+    def record_output_frame(self) -> None:
+        self._output_frame_count += 1
+
+    def set_calib_status(self, status: str) -> None:
+        self._calib_status = status
+
+    def get_fps(self, sensor_key: str) -> float:
+        """估算传感器实际帧率。"""
+        times = self._frame_times.get(sensor_key, deque())
+        if len(times) < 2:
+            return 0.0
+        duration = times[-1] - times[0]
+        if duration <= 0:
+            return 0.0
+        return len(times) / duration
+
+    def get_output_fps(self) -> float:
+        elapsed = time.time() - self._start_time
+        if elapsed <= 0:
+            return 0.0
+        return self._output_frame_count / elapsed
+
+    def get_diagnostics_report(self) -> Dict[str, Any]:
+        """生成诊断报告。"""
+        report = {
+            'timestamp': time.time(),
+            'uptime_seconds': time.time() - self._start_time,
+            'sensor_fps': {},
+            'inference_latency_ms': self._last_inference_latency,
+            'output_fps': self.get_output_fps(),
+            'calib_status': self._calib_status,
+            'anomalies': list(self._sensor_anomalies),
+        }
+        for key in self._frame_times:
+            report['sensor_fps'][key] = round(self.get_fps(key), 1)
+        return report
+
+    def log_diagnostics(self) -> None:
+        """记录诊断日志。"""
+        report = self.get_diagnostics_report()
+        fps_str = ', '.join(f'{k}={v}Hz' for k, v in report['sensor_fps'].items())
+        logger.info(
+            'DIAG: uptime=%.1fs, sensor_fps=[%s], output_fps=%.1f, '
+            'inference_latency=%.1fms, calib=%s',
+            report['uptime_seconds'], fps_str,
+            report['output_fps'], report['inference_latency_ms'],
+            report['calib_status'],
+        )
+
+
+# ==============================================================================
+# MAIN NODE
+# ==============================================================================
+class RTGBEVNode:
+    """RTG BEV 防撞系统 ROS1 主节点。
+
+    数据流:
+      传感器回调 → 同步缓冲区 → 预处理 → 推理 → 跟踪 → 运动估计 → 预警 → 发布
+    """
+
+    def __init__(self, config_dir: str, ros_node_name: str = 'rtg_bev_node'):
+        """
+        Parameters
+        ----------
+        config_dir : str
+            配置文件目录路径。
+        ros_node_name : str
+            ROS1 节点名称。
+        """
+        self._config_dir = os.path.abspath(config_dir)
+        self._ros_node_name = ros_node_name
+
+        # 加载配置
+        logger.info('Loading configs from %s ...', self._config_dir)
+        self._config = ConfigLoader(self._config_dir)
+        self._config.load_all()
+
+        self._system_cfg = self._config.system
+        self._ros_cfg = self._system_cfg.get('ros', {})
+        self._perf_targets = self._config.get_performance_targets()
+
+        # 初始化模块
+        self._tracker = Tracker()
+        self._ego_motion = EgoMotionEstimator()
+        self._warning_engine = WarningEngine(self._config)
+        self._diagnostics = DiagnosticsCollector()
+        # 自车 footprint 点云过滤
+        geometry_path = os.path.join(self._config_dir, 'geometry.yaml')
+        self._footprint_filter = SelfFootprintFilter(geometry_path) \
+            if os.path.exists(geometry_path) else None
+
+        # 模型推理
+        self._model: Any = None
+        self._model_ready = False
+        self._cached_img_metas: Any = None
+        try:
+            self._model = self._load_model()
+        except Exception as e:
+            logger.warning('Model loading skipped: %s', e)
+            self._model = None
+            self._model_ready = False
+
+        # 传感器缓冲区 (用于时间戳同步)
+        self._sensor_buffer = SensorBuffer(maxlen=30)
+        self._sync_window = self._ros_cfg.get('sync_window', 0.05)
+
+        # ROS1 状态
+        self._ros_initialized = False
+        self._publishers: Dict[str, Any] = {}
+        self._subscribers: List[Any] = []
+
+        # 主循环控制
+        self._running = False
+        self._last_diag_time = time.time()
+        self._diag_interval = 1.0  # 诊断输出周期 (秒)
+
+        # 初始化 ROS1 (如果可用)
+        if ROS_AVAILABLE:
+            self._init_ros()
+
+        # 验证标定文件
+        self._diagnostics.set_calib_status(
+            'ok' if self._config.calib else 'missing'
+        )
+
+        logger.info('RTGBEVNode initialized')
+
+    # ------------------------------------------------------------------
+    # ROS1 初始化
+    # ------------------------------------------------------------------
+    def _init_ros(self) -> None:
+        """初始化 ROS1 节点、订阅者和发布者。"""
+        rospy.init_node(self._ros_node_name, anonymous=False)
+
+        # 创建发布者
+        publishers_cfg = self._ros_cfg.get('publishers', {})
+        for pub_name, pub_cfg in publishers_cfg.items():
+            topic = pub_cfg.get('topic', '')
+            msg_type_str = pub_cfg.get('type', '')
+            queue_size = pub_cfg.get('queue_size', 10)
+
+            msg_type = _resolve_msg_type(msg_type_str)
+            if msg_type is not None and topic:
+                self._publishers[pub_name] = rospy.Publisher(
+                    topic, msg_type, queue_size=queue_size
+                )
+                logger.info('Publisher: %s → %s (%s)', pub_name, topic, msg_type_str)
+            else:
+                logger.warning('Cannot create publisher "%s": type=%s not resolved',
+                               pub_name, msg_type_str)
+
+        # 创建订阅者
+        subscribers_cfg = self._ros_cfg.get('subscribers', {})
+        for sub_name, sub_cfg in subscribers_cfg.items():
+            topic = sub_cfg.get('topic', '')
+            msg_type_str = sub_cfg.get('type', '')
+            queue_size = sub_cfg.get('queue_size', 5)
+            if not topic:
+                continue
+
+            msg_type = _resolve_msg_type(msg_type_str)
+            if msg_type is not None:
+                sub = rospy.Subscriber(
+                    topic,
+                    msg_type,
+                    callback=self._make_sensor_callback(sub_name),
+                    queue_size=queue_size,
+                )
+                self._subscribers.append(sub)
+                logger.info('Subscriber: %s ← %s (%s)', sub_name, topic, msg_type_str)
+
+        # 创建 ROS1 service (热更新 warning.yaml)
+        try:
+            from std_srvs.srv import Empty, EmptyResponse
+            rospy.Service(
+                '/rtg_bev/reload_warning_config',
+                Empty,
+                self._handle_reload_warning,
+            )
+            logger.info('Service: /rtg_bev/reload_warning_config')
+        except Exception:
+            logger.warning('Could not create reload_warning_config service')
+
+        try:
+            rospy.Service(
+                '/rtg_bev/set_warning_param',
+                _make_set_param_srv() if _make_set_param_srv() is not None else None,
+                self._handle_set_warning_param,
+            )
+            logger.info('Service: /rtg_bev/set_warning_param')
+        except Exception:
+            logger.warning('Could not create set_warning_param service')
+
+        self._ros_initialized = True
+
+    # ------------------------------------------------------------------
+    # 传感器回调工厂
+    # ------------------------------------------------------------------
+    def _make_sensor_callback(self, sensor_key: str):
+        """为每个传感器创建回调函数 (闭包)。"""
+        def callback(msg):
+            ts = _extract_timestamp(msg)
+            self._sensor_buffer.add(msg, ts, sensor_key)
+            self._diagnostics.record_sensor_frame(sensor_key, ts)
+        return callback
+
+    # ------------------------------------------------------------------
+    # ROS1 Service handlers
+    # ------------------------------------------------------------------
+    def _handle_reload_warning(self, req):
+        """处理 warning.yaml 重载请求。"""
+        try:
+            self._config.reload_warning()
+            self._warning_engine.reset()
+            logger.info('warning.yaml reloaded via service')
+            if ROS_AVAILABLE:
+                from std_srvs.srv import EmptyResponse
+                return EmptyResponse()
+        except Exception as e:
+            logger.error('Failed to reload warning.yaml: %s', e)
+        if ROS_AVAILABLE:
+            from std_srvs.srv import EmptyResponse
+            return EmptyResponse()
+
+    def _handle_set_warning_param(self, req):
+        """处理单个参数热更新请求。"""
+        try:
+            key = getattr(req, 'key', '')
+            value_str = getattr(req, 'value', '')
+            # 尝试类型转换
+            try:
+                value = float(value_str)
+            except ValueError:
+                value = value_str
+            success = self._config.set_warning_param(key, value)
+            logger.info('set_warning_param %s=%s → %s', key, value_str, success)
+            if ROS_AVAILABLE:
+                from std_srvs.srv import EmptyResponse
+                return EmptyResponse()
+        except Exception as e:
+            logger.error('Failed to set warning param: %s', e)
+        if ROS_AVAILABLE:
+            from std_srvs.srv import EmptyResponse
+            return EmptyResponse()
+
+    # ------------------------------------------------------------------
+    # 主处理循环
+    # ------------------------------------------------------------------
+    def process_frame(
+        self,
+        sensor_frame: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """处理一帧同步后的传感器数据。
+
+        Parameters
+        ----------
+        sensor_frame : dict
+            {camera_01, camera_02, lidar_01, lidar_02, timestamp, ...}
+
+        Returns
+        -------
+        output : dict
+            {detections, tracks, warnings, ego_motion}
+        """
+        t_start = time.time()
+        ts = sensor_frame.get('timestamp', time.time())
+
+        # ---------------------------------------------------------------
+        # 步骤 1: 预处理 — 点云拼接 + 图像 decode (预留)
+        # ---------------------------------------------------------------
+        lidar_points = self._preprocess_lidar(sensor_frame)
+        images = self._preprocess_camera(sensor_frame)
+
+        # ---------------------------------------------------------------
+        # 步骤 2: 推理 — CenterPoint 模型推理
+        # ---------------------------------------------------------------
+        detections = self._run_inference(lidar_points, images, ts)
+
+        # ---------------------------------------------------------------
+        # 步骤 3: 跟踪
+        # ---------------------------------------------------------------
+        tracks = self._tracker.update(detections, ts)
+
+        # ---------------------------------------------------------------
+        # 步骤 4: 运动估计
+        # ---------------------------------------------------------------
+        ego_result = self._ego_motion.update(lidar_points, detections, ts)
+
+        # ---------------------------------------------------------------
+        # 步骤 5: 预警
+        # ---------------------------------------------------------------
+        warning_result = self._warning_engine.evaluate(
+            tracks, ego_result['state'], ts,
+        )
+
+        # ---------------------------------------------------------------
+        # 汇总输出
+        # ---------------------------------------------------------------
+        latency_ms = (time.time() - t_start) * 1000.0
+        self._diagnostics.record_inference(latency_ms)
+        self._diagnostics.record_output_frame()
+
+        output = {
+            'timestamp': ts,
+            'detections': detections,
+            'tracks': tracks,
+            'warnings': warning_result.get('warnings', []),
+            'active_zones': warning_result.get('active_zones', []),
+            'ego_motion': ego_result,
+            'diagnostics': self._diagnostics.get_diagnostics_report(),
+            'latency_ms': latency_ms,
+        }
+
+        # 调试日志
+        logger.debug(
+            'Frame ts=%.3f: %d dets, %d tracks, %d warnings, '
+            'ego=%s, latency=%.1fms',
+            ts,
+            len(detections), len(tracks),
+            len(warning_result.get('warnings', [])),
+            ego_result['state_name'],
+            latency_ms,
+        )
+
+        return output
+
+    # ------------------------------------------------------------------
+    # 预处理 (占位)
+    # ------------------------------------------------------------------
+    def _preprocess_lidar(
+        self, sensor_frame: Dict[str, Any]
+    ) -> np.ndarray:
+        """点云预处理: 外参拼接 + self-footprint 过滤。
+
+        处理流程:
+          1. 读取 lidar_01 / lidar_02 点云
+          2. 外参拼接 (rear→front 坐标系, 需 calib.yaml)
+          3. 自车 footprint 过滤 (基于 geometry.yaml)
+        """
+        points_list = []
+        for key in ('lidar_01', 'lidar_02'):
+            msg = sensor_frame.get(key)
+            if msg is not None:
+                pts = _pointcloud2_to_numpy(msg)
+                if pts is not None and len(pts) > 0:
+                    points_list.append(pts)
+
+        if not points_list:
+            return np.zeros((0, 3), dtype=np.float32)
+
+        merged = np.vstack(points_list)
+
+        # ---- 自车 footprint 过滤 ----
+        if self._footprint_filter is not None and \
+           self._footprint_filter.has_footprint:
+            # 当前仅单雷达 (lidar_01 = L1, 集卡侧前), 直接过滤
+            merged = self._footprint_filter.filter(merged, lidar_id=1)
+            # TODO: 双雷达时需分别用对应 lidar_id 过滤再拼接
+
+        return merged
+
+    def _preprocess_camera(
+        self, sensor_frame: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """相机预处理: 图像 decode + resize + normalize。
+
+        当前为占位实现。
+        """
+        images = {}
+        for key in ('camera_01', 'camera_02'):
+            msg = sensor_frame.get(key)
+            if msg is not None:
+                # 实际: sensor_msgs/Image → numpy
+                img = _image_msg_to_numpy(msg)
+                if img is not None:
+                    images[key] = img
+        return images
+
+    # ------------------------------------------------------------------
+    # 推理
+    # ------------------------------------------------------------------
+    def _load_model(self) -> Optional[Any]:
+        """加载 CenterPoint 模型 (det3d 框架)。
+
+        Returns None if model loading is disabled or fails.
+        """
+        model_cfg = self._system_cfg.get('model', {})
+        enabled = model_cfg.get('enabled', False)
+        if not enabled:
+            logger.info('Model loading disabled (system.yaml: model.enabled=false)')
+            return None
+
+        config_path = model_cfg.get('config_path', '')
+        checkpoint_path = model_cfg.get('checkpoint_path', '')
+
+        if not config_path or not checkpoint_path:
+            logger.warning('Model config_path or checkpoint_path is empty')
+            return None
+
+        # 转为绝对路径 (基于 CenterPoint 目录)
+        cp_root = os.path.join(_PROJECT_ROOT, 'CenterPoint')
+        if not os.path.isabs(config_path):
+            config_path = os.path.join(cp_root, config_path)
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(cp_root, checkpoint_path)
+
+        try:
+            from det3d.torchie import Config
+            from det3d.models import build_detector
+
+            logger.info('Loading model config: %s', config_path)
+            cfg = Config.fromfile(config_path)
+
+            model = build_detector(cfg.model, train_cfg=None, test_cfg=cfg.test_cfg)
+
+            logger.info('Loading checkpoint: %s', checkpoint_path)
+            from det3d.torchie.trainer import load_checkpoint
+            load_checkpoint(model, checkpoint_path, map_location='cpu')
+
+            # 保存 test_cfg 供推理时使用
+            model._test_cfg = cfg.test_cfg
+            model._voxel_cfg = cfg.voxel_generator if hasattr(cfg, 'voxel_generator') else None
+
+            # 设备
+            gpu_cfg = self._system_cfg.get('gpu', {})
+            device_id = gpu_cfg.get('device_id', 0)
+            fp16 = model_cfg.get('fp16', False)
+
+            model = model.cuda(device_id)
+            model.eval()
+            if fp16:
+                model = model.half()
+
+            # 初始化 voxel generator (用于推理时体素化)
+            from det3d.core.input.voxel_generator import VoxelGenerator
+            pc_range = cfg.get('point_cloud_range', [-60.0, -25.2, -3.0, 60.0, 25.2, 8.0])
+            vs = cfg.get('voxel_size', [0.075, 0.075, 0.2])
+            self._voxel_generator = VoxelGenerator(
+                voxel_size=vs,
+                point_cloud_range=pc_range,
+                max_num_points=10,
+                max_voxels=160000,
+            )
+            self._voxel_grid_size = tuple(self._voxel_generator.grid_size)
+
+            self._model_ready = True
+            logger.info('CenterPoint model loaded successfully')
+            return model
+
+        except Exception as e:
+            logger.error('Failed to load model: %s', e, exc_info=True)
+            self._model_ready = False
+            return None
+
+    def _run_inference(
+        self,
+        points: np.ndarray,
+        images: Dict[str, Any],
+        timestamp: float,
+    ) -> List[Dict[str, Any]]:
+        """CenterPoint 推理接口 (LiDAR-only)。
+
+        数据流: 体素化 → reader → backbone → neck → head → decode+NMS
+        """
+        if not getattr(self, '_model_ready', False) or self._model is None:
+            return []
+
+        model_cfg = self._system_cfg.get('model', {})
+        score_thr = model_cfg.get('score_threshold', 0.1)
+        fp16 = model_cfg.get('fp16', False)
+
+        try:
+            if points.shape[0] == 0:
+                return []
+
+            # 限制点数 + 确保5通道
+            max_pts = model_cfg.get('max_points', 200000)
+            if points.shape[0] > max_pts:
+                idx = np.random.choice(points.shape[0], max_pts, replace=False)
+                points = points[idx]
+            if points.shape[1] < 5:
+                points = np.pad(points, ((0, 0), (0, 5 - points.shape[1])),
+                                constant_values=0)
+
+            # Step 1: 体素化
+            voxels, coordinates, num_points = self._voxel_generator.generate(
+                points, max_voxels=160000
+            )
+
+            voxels_t = torch.from_numpy(voxels).float()
+            num_points_t = torch.from_numpy(num_points).float()
+            coors_t = torch.from_numpy(coordinates).long()
+
+            if fp16:
+                voxels_t = voxels_t.half()
+
+            voxels_t = voxels_t.cuda()
+            num_points_t = num_points_t.cuda()
+            coors_t = coors_t.cuda()
+
+            # Step 2: Reader (VoxelFeatureExtractorV3)
+            input_features = self._model.reader(voxels_t, num_points_t)
+            if fp16:
+                input_features = input_features.half()
+
+            # Step 3: Backbone (SpMiddleResNetFHD)
+            x, _ = self._model.backbone(
+                input_features, coors_t, 1, self._voxel_grid_size
+            )
+
+            # Step 4: Neck (RPN)
+            x = self._model.neck(x)
+
+            # Step 5: Head (CenterHead)
+            preds, _ = self._model.bbox_head(x)
+
+            # Step 6: Decode + NMS
+            example = {'metadata': []}
+            result = self._model.bbox_head.predict(example, preds, self._model._test_cfg)
+
+            # 解析结果
+            if not result:
+                return []
+
+            detections = []
+            for r_idx, r in enumerate(result):
+                boxes = r.get('box3d_lidar', None)
+                scores = r.get('scores', None)
+                labels = r.get('label_preds', None)
+
+                if boxes is None or scores is None:
+                    continue
+
+                for j in range(len(boxes)):
+                    if scores[j] < score_thr:
+                        continue
+                    box = boxes[j]
+                    cls_label = int(labels[j])
+
+                    # CenterPoint class mapping: 0-based → RTG class_id
+                    cls_id = min(cls_label, len(RTG_CLASS_NAME_TO_ID) - 1)
+
+                    detections.append({
+                        'class_id': cls_id,
+                        'class_name': list(RTG_CLASS_NAME_TO_ID.keys())[cls_id],
+                        'confidence': float(scores[j]),
+                        'x': float(box[0]),
+                        'y': float(box[1]),
+                        'z': float(box[2]),
+                        'w': float(box[3]),
+                        'l': float(box[4]),
+                        'h': float(box[5]),
+                        'yaw': float(box[-1]),
+                        'vx': float(box[6]) if box.shape[0] > 7 else 0.0,
+                        'vy': float(box[7]) if box.shape[0] > 7 else 0.0,
+                    })
+
+            return detections
+
+        except Exception as e:
+            logger.error('Inference error: %s', e, exc_info=True)
+            return []
+
+    # ------------------------------------------------------------------
+    # 发布
+    # ------------------------------------------------------------------
+    def publish(self, output: Dict[str, Any]) -> None:
+        """发布所有输出 topic。"""
+        if not self._ros_initialized:
+            return
+
+        ts = output['timestamp']
+
+        # detections
+        if 'detections' in self._publishers:
+            det_msg = _build_detection_array(output['detections'], ts)
+            self._publishers['detections'].publish(det_msg)
+
+        # tracks
+        if 'tracks' in self._publishers:
+            trk_msg = _build_track_array(output['tracks'], ts)
+            self._publishers['tracks'].publish(trk_msg)
+
+        # warnings
+        if 'warnings' in self._publishers:
+            warn_msg = _build_warning_array(output, ts)
+            self._publishers['warnings'].publish(warn_msg)
+
+        # ego_motion
+        if 'ego_motion' in self._publishers:
+            ego_msg = _build_ego_motion_state(output['ego_motion'])
+            self._publishers['ego_motion'].publish(ego_msg)
+
+    # ------------------------------------------------------------------
+    # 运行循环
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        """主循环: 反复尝试同步传感器 → 处理 → 发布。"""
+        self._running = True
+        logger.info('RTGBEVNode running (ROS=%s)', ROS_AVAILABLE)
+
+        if ROS_AVAILABLE:
+            self._run_ros_spin()
+        else:
+            self._run_standalone()
+
+    def _run_ros_spin(self) -> None:
+        """ROS1 回调驱动模式。"""
+        rate = rospy.Rate(20)  # 20Hz 处理循环
+
+        while not rospy.is_shutdown() and self._running:
+            # 尝试从缓冲区获取同步帧
+            sensor_frame = self._sensor_buffer.get_synced_frame(self._sync_window)
+
+            if sensor_frame is not None:
+                try:
+                    output = self.process_frame(sensor_frame)
+                    self.publish(output)
+                except Exception:
+                    logger.error('Frame processing error:\n%s', traceback.format_exc())
+
+            # 定期输出诊断
+            now = time.time()
+            if now - self._last_diag_time >= self._diag_interval:
+                self._diagnostics.log_diagnostics()
+                self._last_diag_time = now
+
+            # 清理旧传感器数据
+            cutoff = time.time() - 1.0
+            if ROS_AVAILABLE:
+                cutoff = rospy.get_time() - 1.0
+            self._sensor_buffer.clear_old(cutoff)
+
+            rate.sleep()
+
+    def _run_standalone(self) -> None:
+        """无 ROS1 的独立模式 (仅用于测试)。"""
+        logger.warning('Running in standalone mode (no ROS1)')
+        try:
+            while self._running:
+                time.sleep(0.05)
+                now = time.time()
+                if now - self._last_diag_time >= self._diag_interval:
+                    self._diagnostics.log_diagnostics()
+                    self._last_diag_time = now
+        except KeyboardInterrupt:
+            self._running = False
+            logger.info('Shutdown')
+
+    def shutdown(self) -> None:
+        """关闭节点。"""
+        self._running = False
+        logger.info('RTGBEVNode shutdown')
+
+
+# ==============================================================================
+# ROS1 Message Helpers
+# ==============================================================================
+def _extract_timestamp(msg) -> float:
+    """从 ROS1 消息中提取时间戳。"""
+    if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
+        stamp = msg.header.stamp
+        if hasattr(stamp, 'to_sec'):
+            return stamp.to_sec()
+        return float(stamp) if stamp else time.time()
+    return time.time()
+
+
+def _pointcloud2_to_numpy(msg) -> Optional[np.ndarray]:
+    """sensor_msgs/PointCloud2 → numpy (N, 4+) [x, y, z, intensity, ...]。
+
+    无 ROS1 返回 None。
+    """
+    if not ROS_AVAILABLE:
+        return None
+    try:
+        from sensor_msgs.point_cloud2 import read_points
+        points_list = list(read_points(msg, field_names=('x', 'y', 'z'),
+                                         skip_nans=True))
+        if not points_list:
+            return np.zeros((0, 3), dtype=np.float32)
+        return np.array(points_list, dtype=np.float32)
+    except Exception as e:
+        logger.warning('Failed to parse PointCloud2: %s', e)
+        return None
+
+
+def _image_msg_to_numpy(msg) -> Optional[Any]:
+    """sensor_msgs/Image → numpy (H,W,C)。
+
+    无 ROS1 返回 None。
+    """
+    if not ROS_AVAILABLE:
+        return None
+    try:
+        from cv_bridge import CvBridge
+        bridge = CvBridge()
+        cv_img = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        return cv_img
+    except Exception:
+        pass
+
+    # 降级: 手动 decode (需要 PIL/Pillow)
+    try:
+        import PIL.Image
+        import io
+        raw = bytes(msg.data)
+        img = PIL.Image.open(io.BytesIO(raw))
+        return np.array(img)
+    except Exception:
+        pass
+
+    return None
+
+
+def _resolve_msg_type(type_str: str) -> Optional[type]:
+    """解析 ROS1 消息类型字符串 → Python class。"""
+    if not ROS_AVAILABLE:
+        return None
+    mapping = {
+        'sensor_msgs/Image': _import_or_none('sensor_msgs.msg', 'Image'),
+        'sensor_msgs/PointCloud2': _import_or_none('sensor_msgs.msg', 'PointCloud2'),
+        'diagnostic_msgs/DiagnosticArray': _import_or_none('diagnostic_msgs.msg', 'DiagnosticArray'),
+    }
+
+    if type_str in mapping:
+        return mapping[type_str]
+
+    # rtg_bev_msgs/* 类型
+    if type_str.startswith('rtg_bev_msgs/'):
+        msg_name = type_str.split('/')[-1]
+        return _import_or_none('rtg_bev_msgs.msg', msg_name)
+
+    return None
+
+
+def _import_or_none(module: str, attr: str) -> Optional[type]:
+    try:
+        import importlib
+        mod = importlib.import_module(module)
+        return getattr(mod, attr, None)
+    except ImportError:
+        return None
+
+
+def _make_set_param_srv():
+    """构造 SetWarningParam service 类型。"""
+    if not ROS_AVAILABLE:
+        return None
+    try:
+        from rospy.service import ServiceDefinition
+        from std_srvs.srv import EmptyResponse
+        # 尝试动态创建，或使用默认 handler
+        return None  # 简化: set_param 使用 Empty srv type
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 消息构建辅助函数
+# ---------------------------------------------------------------------------
+def _build_detection_array(
+    detections: List[Dict],
+    timestamp: float,
+) -> Any:
+    """构建 DetectionArray ROS1 消息。"""
+    from rtg_bev_msgs import Detection, DetectionArray, Header
+    msg = DetectionArray()
+    msg.header = Header()
+    msg.header.stamp = _to_ros_time(timestamp)
+    msg.header.frame_id = 'rtg_bev_origin'
+
+    for i, det in enumerate(detections):
+        d = Detection()
+        d.id = i
+        d.class_id = det.get('class_id', 0)
+        d.class_name = det.get('class_name', '')
+        d.confidence = det.get('confidence', 0.0)
+        d.x = det.get('x', 0.0)
+        d.y = det.get('y', 0.0)
+        d.z = det.get('z', 0.0)
+        d.w = det.get('w', 0.0)
+        d.l = det.get('l', 0.0)
+        d.h = det.get('h', 0.0)
+        d.yaw = det.get('yaw', 0.0)
+        d.vx = det.get('vx', 0.0)
+        d.vy = det.get('vy', 0.0)
+        d.distance = det.get('distance', 0.0)
+        msg.detections.append(d)
+
+    return msg
+
+
+def _build_track_array(
+    tracks: List[Dict],
+    timestamp: float,
+) -> Any:
+    """构建 TrackArray ROS1 消息。"""
+    from rtg_bev_msgs import Track, TrackArray, Header
+    msg = TrackArray()
+    msg.header = Header()
+    msg.header.stamp = _to_ros_time(timestamp)
+    msg.header.frame_id = 'rtg_bev_origin'
+
+    for trk in tracks:
+        t = Track()
+        t.track_id = trk.get('track_id', -1)
+        t.class_id = trk.get('class_id', 0)
+        t.age = trk.get('age', 0)
+        t.x = trk.get('x', 0.0)
+        t.y = trk.get('y', 0.0)
+        t.z = trk.get('z', 0.0)
+        t.vx = trk.get('vx', 0.0)
+        t.vy = trk.get('vy', 0.0)
+        t.w = trk.get('w', 0.0)
+        t.l = trk.get('l', 0.0)
+        t.h = trk.get('h', 0.0)
+        t.yaw = trk.get('yaw', 0.0)
+        t.state = trk.get('state', 0)
+        msg.tracks.append(t)
+
+    return msg
+
+
+def _build_warning_array(
+    output: Dict[str, Any],
+    timestamp: float,
+) -> Any:
+    """构建 WarningArray ROS1 消息。"""
+    from rtg_bev_msgs import Warning, WarningArray, WarningZone, Header
+    msg = WarningArray()
+    msg.header = Header()
+    msg.header.stamp = _to_ros_time(timestamp)
+    msg.header.frame_id = 'rtg_bev_origin'
+    msg.ego_motion_state = output.get('ego_motion', {}).get('state', 3)
+
+    for w in output.get('warnings', []):
+        wrn = Warning()
+        wrn.track_id = w.get('track_id', -1)
+        wrn.warning_level = w.get('warning_level', 0)
+        wrn.target_class = w.get('target_class', 0)
+        wrn.distance = w.get('distance', 0.0)
+        wrn.zone = w.get('zone', '')
+        wrn.trigger_reason = w.get('trigger_reason', '')
+        wrn.trigger_time = _to_ros_time(w.get('trigger_time', timestamp))
+        msg.warnings.append(wrn)
+
+    for zone in output.get('active_zones', []):
+        wz = WarningZone()
+        wz.name = zone.get('name', '')
+        wz.weight = zone.get('weight', 0.0)
+        wz.y_min = zone.get('y_min', 0.0)
+        wz.y_max = zone.get('y_max', 0.0)
+        wz.description = zone.get('description', '')
+        msg.active_zones.append(wz)
+
+    return msg
+
+
+def _build_ego_motion_state(ego_result: Dict[str, Any]) -> Any:
+    """构建 EgoMotionState ROS1 消息。"""
+    from rtg_bev_msgs import EgoMotionState as EgoMsg
+    msg = EgoMsg()
+    msg.state = ego_result.get('state', 3)
+    msg.confidence = ego_result.get('confidence', 0.0)
+    msg.displacement = ego_result.get('displacement', 0.0)
+    msg.velocity_estimate = ego_result.get('velocity_estimate', 0.0)
+    return msg
+
+
+def _to_ros_time(timestamp: float) -> Any:
+    """float timestamp → rospy.Time。"""
+    if ROS_AVAILABLE and rospy is not None:
+        return rospy.Time.from_sec(timestamp)
+    return timestamp
+
+
+# ==============================================================================
+# Entry Point
+# ==============================================================================
+def main():
+    parser = argparse.ArgumentParser(description='RTG BEV Anti-Collision Node')
+    parser.add_argument(
+        '--config-dir',
+        default=None,
+        help='Path to config directory (default: PROJECT_ROOT/config)',
+    )
+    parser.add_argument(
+        '--log-level',
+        default='INFO',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='Log level',
+    )
+    parser.add_argument(
+        '--standalone',
+        action='store_true',
+        help='Run in standalone mode without ROS1',
+    )
+    args = parser.parse_args()
+
+    # 日志设置
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+
+    # 配置目录
+    config_dir = args.config_dir
+    if config_dir is None:
+        config_dir = os.path.join(_PROJECT_ROOT, 'config')
+
+    # 创建并运行节点
+    node = RTGBEVNode(config_dir=config_dir)
+    try:
+        node.run()
+    except KeyboardInterrupt:
+        logger.info('Interrupted by user')
+    finally:
+        node.shutdown()
+
+
+if __name__ == '__main__':
+    main()
