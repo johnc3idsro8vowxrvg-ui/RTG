@@ -20,7 +20,3 @@ logs/
 # CUDA-CenterPoint build
 CUDA-CenterPoint/build/
 
-# Per-machine config (keep calib_from_bag/calib_synthetic/warning.yaml)
-config/calib.yaml
-config/geometry.yaml
-config/system.yaml
