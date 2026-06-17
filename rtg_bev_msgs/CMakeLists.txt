@@ -23,6 +23,7 @@ add_message_files(
 add_service_files(
   FILES
   SetWarningParam.srv
+  ReloadWarningConfig.srv
 )
 
 generate_messages(

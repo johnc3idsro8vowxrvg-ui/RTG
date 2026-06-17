@@ -138,8 +138,8 @@ model:
   # 模型权重路径
   checkpoint_path: "work_dirs/rtg_centerpoint_voxelnet/latest.pth"
   # 输入分辨率 (覆写模型配置文件中的值)
-  image_width: 1920
-  image_height: 1080
+  image_width: 1080
+  image_height: 1920
   # 是否使用半精度推理
   fp16: true
 
