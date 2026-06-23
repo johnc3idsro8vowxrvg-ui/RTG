@@ -51,7 +51,7 @@ class WarningEngine:
         thresholds = self._config_loader.get_distance_thresholds()
         frame_conf = self._config_loader.get_frame_confirmation()
         ego_cfg = self._config_loader.get_ego_motion_config()
-        static_policy = self._ego_geom.get('risk_model', {}).get('static_policy', {})
+        static_policy = self._build_static_policy(ego_cfg)
         dir_weight_cfg = self._ego_geom.get('risk_model', {}).get('motion_direction_weight', {})
         output_rules = self._config_loader.get_output_rules()
         min_conf = output_rules.get('min_confidence_for_warning', 0.3)
@@ -261,6 +261,24 @@ class WarningEngine:
             return WarningLevel.INFO
 
         return WarningLevel.NONE
+
+    def _build_static_policy(self, ego_cfg: Dict) -> Dict:
+        """Merge geometry defaults with warning.yaml ego_motion overrides."""
+        policy = dict(self._ego_geom.get('risk_model', {}).get('static_policy', {}))
+
+        if 'warn_when_static' in ego_cfg:
+            policy['warn_when_static'] = bool(ego_cfg['warn_when_static'])
+
+        close_cfg = ego_cfg.get('static_close_proximity_alert', {})
+        if isinstance(close_cfg, dict):
+            if 'enabled' in close_cfg:
+                policy['close_proximity_enabled'] = bool(close_cfg['enabled'])
+            if 'distance_threshold' in close_cfg:
+                policy['close_proximity_distance'] = float(close_cfg['distance_threshold'])
+            if 'target_classes' in close_cfg:
+                policy['close_proximity_classes'] = list(close_cfg['target_classes'])
+
+        return policy
 
     # ==================================================================
     # 帧确认 (与之前一致)

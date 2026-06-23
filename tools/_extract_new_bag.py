@@ -111,9 +111,9 @@ for i, frame in enumerate(records):
             msg, ts = frame[lidar_key]
             fields = [f.name for f in msg.fields]
             if 'ring' in fields:
-                # Ouster OS1: keep x,y,z,intensity,ring
+                # Ouster OS1: keep x,y,z,intensity,timestamp
                 pts = np.array(list(point_cloud2.read_points(
-                    msg, field_names=['x','y','z','reflectivity','ring'],
+                    msg, field_names=['x','y','z','reflectivity','t'],
                     skip_nans=True)), dtype=np.float32)
             else:
                 # Helios32: keep x,y,z,intensity

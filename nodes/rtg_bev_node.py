@@ -109,9 +109,9 @@ class SensorBuffer:
         Returns
         -------
         frame : dict or None
-            {camera_01: msg, camera_02: msg, lidar_01: msg, lidar_02: msg, timestamp: float}
+            {lidar_01: msg, lidar_02: msg, camera_01?: msg, timestamp: float}
         """
-        if len(self._buffer) < 4:
+        if len(self._buffer) < 2:
             return None
 
         # 倒序查找: 从最新消息向前找匹配组
@@ -129,8 +129,8 @@ class SensorBuffer:
                     if entry['sensor'] not in group:
                         group[entry['sensor']] = entry['msg']
 
-            # 需要至少包含 camera_01 + lidar_01 (核心传感器)
-            if 'camera_01' in group and 'lidar_01' in group:
+            # V1 LiDAR-only 闭环需要 L1/L2；相机是可视化/扩展输入。
+            if 'lidar_01' in group and 'lidar_02' in group:
                 return {
                     **group,
                     'timestamp': anchor_ts,
@@ -268,6 +268,9 @@ class RTGBEVNode:
         self._model: Any = None
         self._model_ready = False
         self._cached_img_metas: Any = None
+        self._model_class_names = list(RTG_CLASS_NAME_TO_ID.keys())
+        self._torch_device: Any = None
+        self._model_fp16 = False
         try:
             self._model = self._load_model()
         except Exception as e:
@@ -288,6 +291,7 @@ class RTGBEVNode:
         self._running = False
         self._last_diag_time = time.time()
         self._diag_interval = 1.0  # 诊断输出周期 (秒)
+        self._debug_frame_index = 0
 
         # 初始化 ROS1 (如果可用)
         if ROS_AVAILABLE:
@@ -460,6 +464,7 @@ class RTGBEVNode:
         # 步骤 2: 推理 — CenterPoint 模型推理
         # ---------------------------------------------------------------
         detections = self._run_inference(lidar_points, images, ts)
+        self._annotate_detection_distances(detections)
 
         # ---------------------------------------------------------------
         # 步骤 3: 跟踪
@@ -495,6 +500,8 @@ class RTGBEVNode:
             'diagnostics': self._diagnostics.get_diagnostics_report(),
             'latency_ms': latency_ms,
         }
+
+        self._maybe_save_bev_debug(output, lidar_points)
 
         # 调试日志
         logger.debug(
@@ -568,7 +575,7 @@ class RTGBEVNode:
                 merged_parts.append(pts)
 
         if not merged_parts:
-            return np.zeros((0, 3), dtype=np.float32)
+            return np.zeros((0, 5), dtype=np.float32)
 
         return np.vstack(merged_parts)
 
@@ -598,9 +605,12 @@ class RTGBEVNode:
         Returns None if model loading is disabled or fails.
         """
         model_cfg = self._system_cfg.get('model', {})
-        enabled = model_cfg.get('enabled', False)
-        if not enabled:
+        enabled = model_cfg.get('enabled', None)
+        if enabled is False:
             logger.info('Model loading disabled (system.yaml: model.enabled=false)')
+            return None
+        if not HAS_TORCH:
+            logger.warning('PyTorch not installed; inference disabled')
             return None
 
         config_path = model_cfg.get('config_path', '')
@@ -612,10 +622,16 @@ class RTGBEVNode:
 
         # 转为绝对路径 (基于 CenterPoint 目录)
         cp_root = os.path.join(_PROJECT_ROOT, 'CenterPoint')
+        _ensure_import_path(cp_root)
         if not os.path.isabs(config_path):
             config_path = os.path.join(cp_root, config_path)
         if not os.path.isabs(checkpoint_path):
             checkpoint_path = os.path.join(cp_root, checkpoint_path)
+
+        if enabled is None and not os.path.exists(checkpoint_path):
+            logger.warning('Model checkpoint not found; inference disabled: %s',
+                           checkpoint_path)
+            return None
 
         try:
             from det3d.torchie import Config
@@ -623,6 +639,11 @@ class RTGBEVNode:
 
             logger.info('Loading model config: %s', config_path)
             cfg = Config.fromfile(config_path)
+            cfg_class_names = getattr(cfg, 'class_names', None)
+            if cfg_class_names is None and hasattr(cfg, 'get'):
+                cfg_class_names = cfg.get('class_names', None)
+            if cfg_class_names:
+                self._model_class_names = [str(name) for name in cfg_class_names]
 
             model = build_detector(cfg.model, train_cfg=None, test_cfg=cfg.test_cfg)
 
@@ -636,13 +657,18 @@ class RTGBEVNode:
 
             # 设备
             gpu_cfg = self._system_cfg.get('gpu', {})
-            device_id = gpu_cfg.get('device_id', 0)
-            fp16 = model_cfg.get('fp16', False)
+            device = _resolve_torch_device(gpu_cfg)
+            fp16 = bool(model_cfg.get('fp16', False))
+            if str(device) == 'cpu' and fp16:
+                logger.warning('fp16 disabled for CPU inference fallback')
+                fp16 = False
 
-            model = model.cuda(device_id)
+            model = model.to(device)
             model.eval()
             if fp16:
                 model = model.half()
+            self._torch_device = device
+            self._model_fp16 = fp16
 
             # 初始化 voxel generator (用于推理时体素化)
             from det3d.core.input.voxel_generator import VoxelGenerator
@@ -680,7 +706,11 @@ class RTGBEVNode:
 
         model_cfg = self._system_cfg.get('model', {})
         score_thr = model_cfg.get('score_threshold', 0.1)
-        fp16 = model_cfg.get('fp16', False)
+        fp16 = bool(getattr(self, '_model_fp16', False))
+        device = getattr(self, '_torch_device', None)
+        if device is None:
+            logger.error('Model is ready but torch device is not set')
+            return []
 
         try:
             if points.shape[0] == 0:
@@ -699,80 +729,126 @@ class RTGBEVNode:
             voxels, coordinates, num_points = self._voxel_generator.generate(
                 points, max_voxels=160000
             )
+            coordinates = _add_batch_index_to_coordinates(coordinates)
 
-            voxels_t = torch.from_numpy(voxels).float()
-            num_points_t = torch.from_numpy(num_points).float()
-            coors_t = torch.from_numpy(coordinates).long()
+            voxel_dtype = torch.float16 if fp16 else torch.float32
+            voxels_t = torch.from_numpy(voxels).to(device=device, dtype=voxel_dtype)
+            num_points_t = torch.from_numpy(num_points).to(device=device, dtype=torch.float32)
+            coors_t = torch.from_numpy(coordinates).to(device=device, dtype=torch.int32)
 
-            if fp16:
-                voxels_t = voxels_t.half()
+            with torch.no_grad():
+                # Step 2: Reader (VoxelFeatureExtractorV3)
+                input_features = self._model.reader(voxels_t, num_points_t)
+                if fp16:
+                    input_features = input_features.half()
 
-            voxels_t = voxels_t.cuda()
-            num_points_t = num_points_t.cuda()
-            coors_t = coors_t.cuda()
+                # Step 3: Backbone (SpMiddleResNetFHD)
+                x, _ = self._model.backbone(
+                    input_features, coors_t, 1, self._voxel_grid_size
+                )
 
-            # Step 2: Reader (VoxelFeatureExtractorV3)
-            input_features = self._model.reader(voxels_t, num_points_t)
-            if fp16:
-                input_features = input_features.half()
+                # Step 4: Neck (RPN)
+                x = self._model.neck(x)
 
-            # Step 3: Backbone (SpMiddleResNetFHD)
-            x, _ = self._model.backbone(
-                input_features, coors_t, 1, self._voxel_grid_size
-            )
+                # Step 5: Head (CenterHead)
+                preds, _ = self._model.bbox_head(x)
 
-            # Step 4: Neck (RPN)
-            x = self._model.neck(x)
-
-            # Step 5: Head (CenterHead)
-            preds, _ = self._model.bbox_head(x)
-
-            # Step 6: Decode + NMS
-            example = {'metadata': []}
-            result = self._model.bbox_head.predict(example, preds, self._model._test_cfg)
+                # Step 6: Decode + NMS
+                example = {'metadata': []}
+                result = self._model.bbox_head.predict(example, preds, self._model._test_cfg)
 
             # 解析结果
             if not result:
                 return []
 
-            detections = []
-            for r_idx, r in enumerate(result):
-                boxes = r.get('box3d_lidar', None)
-                scores = r.get('scores', None)
-                labels = r.get('label_preds', None)
-
-                if boxes is None or scores is None:
-                    continue
-
-                for j in range(len(boxes)):
-                    if scores[j] < score_thr:
-                        continue
-                    box = boxes[j]
-                    cls_label = int(labels[j])
-
-                    # CenterPoint class mapping: 0-based → RTG class_id
-                    cls_id = min(cls_label, len(RTG_CLASS_NAME_TO_ID) - 1)
-
-                    detections.append({
-                        'class_id': cls_id,
-                        'class_name': list(RTG_CLASS_NAME_TO_ID.keys())[cls_id],
-                        'confidence': float(scores[j]),
-                        'x': float(box[0]),
-                        'y': float(box[1]),
-                        'z': float(box[2]),
-                        'w': float(box[3]),
-                        'l': float(box[4]),
-                        'h': float(box[5]),
-                        'yaw': float(box[-1]),
-                        'vx': float(box[6]) if box.shape[0] > 7 else 0.0,
-                        'vy': float(box[7]) if box.shape[0] > 7 else 0.0,
-                    })
-
-            return detections
+            return _centerpoint_results_to_detections(
+                result,
+                score_thr,
+                self._model_class_names,
+            )
 
         except Exception as e:
             logger.error('Inference error: %s', e, exc_info=True)
             return []
+
+    def _annotate_detection_distances(self, detections: List[Dict[str, Any]]) -> None:
+        """Fill detection distance to nearest RTG leg for ROS output/debugging."""
+        legs = self._config.get_ego_footprint_legs()
+        if not legs:
+            return
+        for det in detections:
+            tx, ty = det.get('x', 0.0), det.get('y', 0.0)
+            det['distance'] = float(min(
+                np.hypot(tx - leg['x'], ty - leg['y']) for leg in legs
+            ))
+
+    def _maybe_save_bev_debug(
+        self,
+        output: Dict[str, Any],
+        lidar_points: np.ndarray,
+    ) -> None:
+        """Save lightweight BEV debug PNGs when debug.bev_visualization.enabled."""
+        debug_cfg = self._system_cfg.get('debug', {}).get('bev_visualization', {})
+        if not debug_cfg.get('enabled', False):
+            return
+
+        save_every = int(debug_cfg.get('save_every_n_frames', 10))
+        if save_every <= 0:
+            save_every = 10
+        self._debug_frame_index += 1
+        if self._debug_frame_index % save_every != 0:
+            return
+
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from tools._draw_tracking import draw_bev_scene_background, draw_track_box
+
+            log_dir = self._system_cfg.get('logging', {}).get('log_dir', 'logs')
+            save_dir = debug_cfg.get('save_dir', os.path.join(log_dir, 'bev_debug'))
+            if not os.path.isabs(save_dir):
+                save_dir = os.path.join(_PROJECT_ROOT, save_dir)
+            os.makedirs(save_dir, exist_ok=True)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            draw_bev_scene_background(ax, draw_labels=False)
+
+            max_points = int(debug_cfg.get('max_points', 12000))
+            if lidar_points is not None and len(lidar_points) > 0:
+                pts = lidar_points
+                if len(pts) > max_points:
+                    idx = np.linspace(0, len(pts) - 1, max_points).astype(np.int64)
+                    pts = pts[idx]
+                ax.scatter(
+                    pts[:, 0], pts[:, 1],
+                    s=0.2, c=pts[:, 2], cmap='viridis',
+                    alpha=0.25, linewidths=0, zorder=1,
+                )
+
+            if debug_cfg.get('show_detections', True):
+                for det in output.get('detections', []):
+                    draw_track_box(ax, {**det, 'track_id': -1, 'state': 0},
+                                   alpha=0.35, linewidth=0.7,
+                                   show_label=False, show_velocity=False)
+
+            if debug_cfg.get('show_tracks', True):
+                for trk in output.get('tracks', []):
+                    draw_track_box(ax, trk, alpha=0.85, show_label=False)
+
+            title = (
+                f"ts={output.get('timestamp', 0):.3f} "
+                f"det={len(output.get('detections', []))} "
+                f"trk={len(output.get('tracks', []))} "
+                f"warn={len(output.get('warnings', []))}"
+            )
+            ax.set_title(title, fontsize=9)
+            fig.tight_layout()
+            path = os.path.join(save_dir, f"bev_{self._debug_frame_index:06d}.png")
+            fig.savefig(path, dpi=140)
+            plt.close(fig)
+        except Exception as e:
+            logger.warning('Failed to save BEV debug visualization: %s', e)
 
     # ------------------------------------------------------------------
     # 发布
@@ -869,31 +945,262 @@ class RTGBEVNode:
 # ==============================================================================
 def _extract_timestamp(msg) -> float:
     """从 ROS1 消息中提取时间戳。"""
+    receive_time = time.time()
+    if ROS_AVAILABLE and rospy is not None:
+        try:
+            receive_time = rospy.get_time()
+        except Exception:
+            receive_time = time.time()
+
     if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
         stamp = msg.header.stamp
         if hasattr(stamp, 'to_sec'):
-            return stamp.to_sec()
-        return float(stamp) if stamp else time.time()
-    return time.time()
+            ts = stamp.to_sec()
+        else:
+            ts = float(stamp) if stamp else 0.0
+        # Ouster bags in this project use device/internal header time, and
+        # archived bags can be far from wall time. In those cases use receive
+        # time so L1/L2/camera callbacks can still form synchronized frames.
+        if ts <= 0 or ts < 1e9 or abs(receive_time - ts) > 3600.0:
+            return receive_time
+        return ts
+    return receive_time
+
+
+def _tensor_to_numpy(value):
+    """Convert torch tensors or array-like values to numpy without assuming CPU."""
+    if value is None:
+        return None
+    if hasattr(value, 'detach'):
+        value = value.detach()
+    if hasattr(value, 'cpu'):
+        value = value.cpu()
+    if hasattr(value, 'numpy'):
+        return value.numpy()
+    return np.asarray(value)
+
+
+def _centerpoint_results_to_detections(
+    result: List[Dict[str, Any]],
+    score_thr: float,
+    class_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Convert CenterPoint prediction dicts into RTG detection dicts."""
+    detections: List[Dict[str, Any]] = []
+    for item in result:
+        boxes = _tensor_to_numpy(item.get('box3d_lidar', None))
+        scores = _tensor_to_numpy(item.get('scores', None))
+        labels = _tensor_to_numpy(item.get('label_preds', None))
+
+        if boxes is None or scores is None:
+            continue
+
+        boxes = np.asarray(boxes)
+        scores = np.asarray(scores).reshape(-1)
+        if labels is None:
+            labels = np.zeros(scores.shape[0], dtype=np.int64)
+        labels = np.asarray(labels).reshape(-1)
+        if boxes.ndim == 1:
+            boxes = boxes.reshape(1, -1)
+
+        for j, box in enumerate(boxes):
+            if j >= scores.shape[0] or scores[j] < score_thr or box.shape[0] < 6:
+                continue
+
+            cls_label = int(labels[j]) if j < labels.shape[0] else 0
+            cls_id, cls_name = _map_model_label_to_rtg_class(cls_label, class_names)
+
+            # CenterPoint boxes are [x,y,z,w,l,h,vx,vy,yaw] for 9-dim output.
+            # Seven-dim boxes omit velocity and keep yaw at index 6.
+            box_dim = int(box.shape[0])
+            yaw = float(box[-1]) if box_dim >= 7 else 0.0
+            vx = float(box[6]) if box_dim >= 9 else 0.0
+            vy = float(box[7]) if box_dim >= 9 else 0.0
+
+            detections.append({
+                'class_id': cls_id,
+                'class_name': cls_name,
+                'confidence': float(scores[j]),
+                'x': float(box[0]),
+                'y': float(box[1]),
+                'z': float(box[2]),
+                'w': float(box[3]),
+                'l': float(box[4]),
+                'h': float(box[5]),
+                'yaw': yaw,
+                'vx': vx,
+                'vy': vy,
+            })
+
+    return detections
+
+
+def _map_model_label_to_rtg_class(
+    label: int,
+    class_names: Optional[List[str]] = None,
+) -> Tuple[int, str]:
+    rtg_names = list(RTG_CLASS_NAME_TO_ID.keys())
+    source_name = None
+
+    if class_names and 0 <= label < len(class_names):
+        source_name = class_names[label]
+    elif 0 <= label < len(rtg_names):
+        source_name = rtg_names[label]
+    elif 0 <= label < len(NUSC_CLASSES):
+        source_name = NUSC_CLASSES[label]
+
+    if source_name in RTG_CLASS_NAME_TO_ID:
+        rtg_name = source_name
+    elif source_name in NUSC_TO_RTG_CLASS:
+        rtg_name = NUSC_TO_RTG_CLASS[source_name]
+    else:
+        rtg_name = 'other_obstacle'
+
+    return RTG_CLASS_NAME_TO_ID[rtg_name], rtg_name
+
+
+def _resolve_torch_device(
+    gpu_cfg: Dict[str, Any],
+    torch_module: Optional[Any] = None,
+) -> Any:
+    """Return the torch device requested by gpu config."""
+    torch_mod = torch if torch_module is None else torch_module
+    if torch_mod is None:
+        raise RuntimeError('PyTorch is not available')
+
+    device_id = int(gpu_cfg.get('device_id', 0))
+    cuda_available = bool(getattr(torch_mod, 'cuda', None) and torch_mod.cuda.is_available())
+    if cuda_available:
+        return torch_mod.device(f'cuda:{device_id}')
+
+    if bool(gpu_cfg.get('allow_fallback_to_cpu', False)):
+        return torch_mod.device('cpu')
+
+    raise RuntimeError('CUDA is not available and gpu.allow_fallback_to_cpu=false')
+
+
+def _ensure_import_path(path: str, path_list: Optional[List[str]] = None) -> None:
+    """Prepend an absolute import path once."""
+    paths = sys.path if path_list is None else path_list
+    abs_path = os.path.abspath(path)
+    if abs_path not in paths:
+        paths.insert(0, abs_path)
+
+
+def _add_batch_index_to_coordinates(
+    coordinates: np.ndarray,
+    batch_index: int = 0,
+) -> np.ndarray:
+    """Convert voxel coordinates from [z,y,x] to CenterPoint [batch,z,y,x]."""
+    coords = np.asarray(coordinates)
+    if coords.ndim != 2 or coords.shape[1] != 3:
+        raise ValueError(f'Expected voxel coordinates with shape (N, 3), got {coords.shape}')
+
+    batch = np.full((coords.shape[0], 1), batch_index, dtype=coords.dtype)
+    return np.hstack((batch, coords)).astype(coords.dtype, copy=False)
 
 
 def _pointcloud2_to_numpy(msg) -> Optional[np.ndarray]:
     """sensor_msgs/PointCloud2 → numpy (N, 4+) [x, y, z, intensity, ...]。
 
-    无 ROS1 返回 None。
+    输出固定为 (N, 5): x, y, z, intensity, timestamp。
+    - Ouster OS1: 使用 reflectivity 作为 intensity, t 作为点内时间。
+    - RoboSense: 使用 intensity, timestamp 缺失时补 0。
+    - 测试/离线模式可直接传入 numpy 数组。
     """
-    if not ROS_AVAILABLE:
+    if msg is None:
         return None
+
+    if isinstance(msg, np.ndarray):
+        return _normalize_points_array(msg)
+
+    if not all(hasattr(msg, attr) for attr in ('fields', 'data', 'point_step')):
+        return None
+
     try:
-        from sensor_msgs.point_cloud2 import read_points
-        points_list = list(read_points(msg, field_names=('x', 'y', 'z'),
-                                         skip_nans=True))
-        if not points_list:
-            return np.zeros((0, 3), dtype=np.float32)
-        return np.array(points_list, dtype=np.float32)
+        fields = {field.name: field for field in msg.fields}
+        if not all(name in fields for name in ('x', 'y', 'z')):
+            logger.warning('PointCloud2 missing x/y/z fields: %s', sorted(fields))
+            return None
+
+        n_points = int(getattr(msg, 'width', 0)) * int(getattr(msg, 'height', 1))
+        if n_points <= 0:
+            return np.zeros((0, 5), dtype=np.float32)
+
+        result = np.zeros((n_points, 5), dtype=np.float32)
+        result[:, 0] = _point_field_array(msg, fields['x']).astype(np.float32)
+        result[:, 1] = _point_field_array(msg, fields['y']).astype(np.float32)
+        result[:, 2] = _point_field_array(msg, fields['z']).astype(np.float32)
+
+        intensity_field = None
+        if 'intensity' in fields:
+            intensity_field = fields['intensity']
+        elif 'reflectivity' in fields:
+            intensity_field = fields['reflectivity']
+        if intensity_field is not None:
+            result[:, 3] = _point_field_array(msg, intensity_field).astype(np.float32)
+
+        timestamp_field = None
+        if 'timestamp' in fields:
+            timestamp_field = fields['timestamp']
+        elif 't' in fields:
+            timestamp_field = fields['t']
+        if timestamp_field is not None:
+            result[:, 4] = _point_field_array(msg, timestamp_field).astype(np.float32)
+
+        finite = np.isfinite(result[:, 0]) & np.isfinite(result[:, 1]) & np.isfinite(result[:, 2])
+        return result[finite]
     except Exception as e:
         logger.warning('Failed to parse PointCloud2: %s', e)
         return None
+
+
+def _normalize_points_array(points: np.ndarray) -> np.ndarray:
+    """Normalize arbitrary point array to [x,y,z,intensity,timestamp]."""
+    arr = np.asarray(points, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        return np.zeros((0, 5), dtype=np.float32)
+
+    out = np.zeros((arr.shape[0], 5), dtype=np.float32)
+    cols = min(arr.shape[1], 5)
+    out[:, :cols] = arr[:, :cols]
+    finite = np.isfinite(out[:, 0]) & np.isfinite(out[:, 1]) & np.isfinite(out[:, 2])
+    return out[finite]
+
+
+def _point_field_array(msg, field) -> np.ndarray:
+    """Read one PointCloud2 field using the field offset and point_step."""
+    endian = '>' if getattr(msg, 'is_bigendian', False) else '<'
+    dtype_map = {
+        1: np.dtype('i1'),          # INT8
+        2: np.dtype('u1'),          # UINT8
+        3: np.dtype(endian + 'i2'), # INT16
+        4: np.dtype(endian + 'u2'), # UINT16
+        5: np.dtype(endian + 'i4'), # INT32
+        6: np.dtype(endian + 'u4'), # UINT32
+        7: np.dtype(endian + 'f4'), # FLOAT32
+        8: np.dtype(endian + 'f8'), # FLOAT64
+    }
+    dtype = dtype_map.get(field.datatype)
+    if dtype is None:
+        raise ValueError(f'Unsupported PointField datatype: {field.datatype}')
+
+    width = int(getattr(msg, 'width', 0))
+    height = int(getattr(msg, 'height', 1))
+    row_step = int(getattr(msg, 'row_step', width * int(msg.point_step)))
+    data = getattr(msg, 'data')
+    if isinstance(data, np.ndarray):
+        buffer = data.tobytes()
+    else:
+        buffer = bytes(data)
+
+    return np.ndarray(
+        shape=(height, width),
+        dtype=dtype,
+        buffer=buffer,
+        offset=int(field.offset),
+        strides=(row_step, int(msg.point_step)),
+    ).reshape(-1)
 
 
 def _image_msg_to_numpy(msg) -> Optional[Any]:

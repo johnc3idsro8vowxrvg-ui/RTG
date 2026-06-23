@@ -1,99 +1,173 @@
-"""Test RTG ego-motion estimation from LiDAR data.
-Uses ICP between consecutive frames on static background points.
-No calibration needed — LiDAR-only.
-"""
-import numpy as np, sys, glob
-SF = '/media/shen/data/zk/Auto/CenterPoint'
-EXT = f'{SF}/data/rtg/extracted/scene_001'
+#!/usr/bin/env python3
+"""Smoke-test RTG ego-motion estimation on synchronized L1/L2 bag frames."""
 
-def load_pts(idx):
-    pts = np.fromfile(f'{EXT}/lidar_01/{idx:06d}.bin', dtype=np.float32).reshape(-1,4)
-    # Remove ground (z < 0.5m from LiDAR = ~2m above BEV ground)
-    # Ouster has ring field, but we only saved x,y,z,intensity (4 fields)
-    # Use height-based ground removal + distance filter
-    non_ground = pts[pts[:, 2] > 0.5]  # Above 0.5m from LiDAR (~2m from ground)
-    # Remove far points (noise)
-    non_ground = non_ground[non_ground[:, 0] < 60]
-    return non_ground
+from __future__ import annotations
 
-def estimate_motion(pts_prev, pts_curr, voxel_size=0.5):
-    """Simple ICP-like translation estimation using voxel grid matching."""
-    from scipy.spatial import cKDTree
-    # Downsample both
-    def downsample(p, vs):
-        if len(p) < 100: return p
-        voxel_idx = np.floor(p[:, :2] / vs).astype(np.int32)
-        _, unique_idx = np.unique(voxel_idx, axis=0, return_index=True)
-        return p[unique_idx]
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional
 
-    p1 = downsample(pts_prev, voxel_size)
-    p2 = downsample(pts_curr, voxel_size)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-    if len(p1) < 50 or len(p2) < 50:
-        return 0.0, 0.0, 0.0
 
-    # Build KD-tree and find correspondences
-    tree = cKDTree(p1[:, :2])  # BEV x,y only
-    dists, idxs = tree.query(p2[:, :2], k=1)
+def iter_synced_lidar_pairs(
+    bag_path: Path,
+    topics: Dict[str, str],
+    sync_window_sec: float,
+    limit: Optional[int] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Yield synchronized lidar_01/lidar_02 message pairs from a ROS1 bag."""
+    try:
+        from rosbags.rosbag1 import Reader
+        from rosbags.typesys import Stores, get_typestore
+    except ImportError as exc:
+        raise RuntimeError(
+            "The pure-Python 'rosbags' package is required outside ROS1. "
+            "Install it with: python -m pip install rosbags"
+        ) from exc
 
-    # Filter outliers
-    valid = dists < 2.0  # 2m max correspondence
-    if valid.sum() < 20:
-        return 0.0, 0.0, 0.0
+    typestore = get_typestore(Stores.ROS1_NOETIC)
+    wanted = {
+        topics["lidar_01"]: "lidar_01",
+        topics["lidar_02"]: "lidar_02",
+    }
+    latest: Dict[str, Dict[str, Any]] = {}
+    emitted = 0
 
-    # Compute mean displacement
-    dx = np.mean(p2[valid, 0] - p1[idxs[valid], 0])
-    dy = np.mean(p2[valid, 1] - p1[idxs[valid], 1])
+    with Reader(bag_path) as reader:
+        connection_by_topic = {conn.topic: conn for conn in reader.connections}
+        missing = [topic for topic in wanted if topic not in connection_by_topic]
+        if missing:
+            raise RuntimeError(f"Missing lidar topic(s) in bag: {missing}")
 
-    # Estimate confidence from inlier ratio
-    confidence = valid.sum() / len(p2)
+        connections = [connection_by_topic[topic] for topic in wanted]
+        for conn, timestamp, rawdata in reader.messages(connections=connections):
+            sensor = wanted[conn.topic]
+            bag_time = float(timestamp) / 1e9
+            msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
+            entry = {"msg": msg, "bag_time": bag_time}
 
-    return dx, dy, confidence
+            other = "lidar_02" if sensor == "lidar_01" else "lidar_01"
+            if other in latest:
+                delta = bag_time - latest[other]["bag_time"]
+                if abs(delta) <= sync_window_sec:
+                    pair = {
+                        sensor: entry,
+                        other: latest[other],
+                        "sync_delta_sec": delta,
+                    }
+                    yield pair
+                    emitted += 1
+                    latest.clear()
+                    if limit is not None and emitted >= limit:
+                        return
+                    continue
 
-# Test on 50 consecutive frame pairs
-print("Loading LiDAR frames for motion estimation...")
-frame_pairs = []
-for i in range(50):
-    pts_prev = load_pts(i)
-    pts_curr = load_pts(i + 1)
-    dx, dy, conf = estimate_motion(pts_prev, pts_curr)
-    displacement = np.sqrt(dx**2 + dy**2)
-    frame_pairs.append((i, dx, dy, displacement, conf, len(pts_prev), len(pts_curr)))
+            latest[sensor] = entry
 
-dx_vals = [f[1] for f in frame_pairs]
-dy_vals = [f[2] for f in frame_pairs]
-disp_vals = [f[3] for f in frame_pairs]
-conf_vals = [f[4] for f in frame_pairs]
 
-print(f'\n=== Motion Estimation Results (50 frame pairs, ~5s) ===')
-print(f'Displacement per frame (100ms):')
-print(f'  Mean: {np.mean(disp_vals):.3f}m')
-print(f'  Max:  {np.max(disp_vals):.3f}m')
-print(f'  Std:  {np.std(disp_vals):.3f}m')
-print(f'Confidence:')
-print(f'  Mean: {np.mean(conf_vals):.3f}')
-print(f'  Min:  {np.min(conf_vals):.3f}')
+def run_bag_ego_motion(
+    bag_path: Path,
+    config_dir: Path,
+    frames: int,
+    sync_window_sec: float,
+) -> List[Dict[str, Any]]:
+    """Run RTGBEVNode on synchronized bag frames and return ego-motion rows."""
+    from nodes.rtg_bev_node import RTGBEVNode
+    from tools._analyze_new_bag import DEFAULT_TOPICS
 
-# Determine motion state
-threshold = 0.05  # 5cm/frame = 0.5m/s minimum detectable motion
-moving_frames = sum(1 for d in disp_vals if d > threshold and conf_vals[disp_vals.index(d)] > 0.3)
-print(f'\nFrames with >{threshold}m displacement (high confidence): {moving_frames}/{len(frame_pairs)}')
+    node = RTGBEVNode(config_dir=str(config_dir))
+    rows: List[Dict[str, Any]] = []
 
-# Check if there's a consistent direction
-if moving_frames > len(frame_pairs) * 0.3:  # >30% frames moving
-    mean_dx = np.mean([f[1] for f in frame_pairs if f[3] > threshold])
-    mean_dy = np.mean([f[2] for f in frame_pairs if f[3] > threshold])
-    direction = '+x' if mean_dx > 0.1 else '-x' if mean_dx < -0.1 else 'unknown'
-    print(f'Mean displacement direction: dx={mean_dx:.3f}m, dy={mean_dy:.3f}m')
-    print(f'RTG appears to be MOVING ({direction})')
-else:
-    print(f'RTG appears to be STATIONARY')
+    for index, pair in enumerate(
+        iter_synced_lidar_pairs(bag_path, DEFAULT_TOPICS, sync_window_sec, frames)
+    ):
+        timestamp = pair["lidar_01"]["bag_time"]
+        output = node.process_frame(
+            {
+                "timestamp": timestamp,
+                "lidar_01": pair["lidar_01"]["msg"],
+                "lidar_02": pair["lidar_02"]["msg"],
+            }
+        )
+        ego = output["ego_motion"]
+        rows.append(
+            {
+                "frame": index,
+                "timestamp": round(float(timestamp), 6),
+                "sync_delta_sec": round(float(pair["sync_delta_sec"]), 6),
+                "state": ego["state_name"],
+                "frame_displacement": round(float(ego["frame_displacement"]), 4),
+                "fitness": round(float(ego["icp_fitness"]), 3),
+                "num_static_points": int(ego["num_static_points"]),
+                "valid": bool(ego["valid"]),
+                "latency_ms": round(float(output["latency_ms"]), 2),
+            }
+        )
 
-# Print first 10 frames detail
-print(f'\n--- Per-frame detail (first 10) ---')
-for f in frame_pairs[:10]:
-    state = 'MOVING' if f[3] > threshold and f[4] > 0.3 else 'static'
-    print(f'  Frame {f[0]:2d}→{f[0]+1:2d}: dx={f[1]:+.3f}m dy={f[2]:+.3f}m '
-          f'disp={f[3]:.3f}m conf={f[4]:.2f} [{state}] pts={f[5]}/{f[6]}')
+    return rows
 
-print(f'\nMotion estimation test: PASS')
+
+def print_rows(rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        print("No synchronized lidar_01/lidar_02 frames found.")
+        return
+
+    print("frame  sync_ms  state     dx_m     fit  static_pts  latency_ms")
+    for row in rows:
+        print(
+            f"{row['frame']:5d}  "
+            f"{row['sync_delta_sec'] * 1000:7.2f}  "
+            f"{row['state']:<8}  "
+            f"{row['frame_displacement']:>7.4f}  "
+            f"{row['fitness']:>4.2f}  "
+            f"{row['num_static_points']:10d}  "
+            f"{row['latency_ms']:10.2f}"
+        )
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Run RTG ego-motion smoke test on real L1/L2 bag frames."
+    )
+    parser.add_argument("bag_path", help="Path to ROS1 .bag file.")
+    parser.add_argument(
+        "--config-dir",
+        default=str(Path(__file__).resolve().parents[1] / "config"),
+        help="RTG config directory.",
+    )
+    parser.add_argument("--frames", type=int, default=10, help="Number of pairs to process.")
+    parser.add_argument(
+        "--sync-window-sec",
+        type=float,
+        default=0.05,
+        help="Maximum L1/L2 pairing delta.",
+    )
+    parser.add_argument("--output", help="Optional JSON report path.")
+    args = parser.parse_args(argv)
+
+    bag_path = Path(args.bag_path)
+    if not bag_path.is_file():
+        raise SystemExit(f"Bag file not found: {bag_path}")
+
+    rows = run_bag_ego_motion(
+        bag_path=bag_path,
+        config_dir=Path(args.config_dir),
+        frames=max(args.frames, 1),
+        sync_window_sec=max(args.sync_window_sec, 0.0),
+    )
+    print_rows(rows)
+
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\nReport written to: {output}")
+
+
+if __name__ == "__main__":
+    main()

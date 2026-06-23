@@ -21,6 +21,7 @@ from det3d.core.input.voxel_generator import VoxelGenerator
 from det3d.datasets.custom import PointCloudDataset
 from det3d.datasets.registry import DATASETS
 from .rtg_common import RTG_CLASS_NAMES
+from .pointcloud_io import load_lidar_bin_5d
 
 
 @DATASETS.register_module
@@ -87,7 +88,7 @@ class RTGDataset(PointCloudDataset):
 
         # Load concatenated lidar point cloud (5-d: x,y,z,intensity,timestamp)
         lidar_path = Path(self._root_path) / info["lidar_path"]
-        points = np.fromfile(str(lidar_path), dtype=np.float32).reshape(-1, 5)
+        points = load_lidar_bin_5d(lidar_path)
 
         # Add timestamp column (zero for single-frame)
         times = np.zeros((points.shape[0], 1), dtype=np.float32)

@@ -72,7 +72,7 @@ TRAIL_ALPHA_END = 0.85
 def draw_bev_scene_background(
     ax: plt.Axes,
     x_lim: Tuple[float, float] = (-50, 50),
-    y_lim: Tuple[float, float] = (-30, 55),
+    y_lim: Tuple[float, float] = (-30, 15),
     draw_rtg: bool = True,
     draw_lanes: bool = True,
     draw_labels: bool = True,
@@ -85,8 +85,8 @@ def draw_bev_scene_background(
     ax.set_ylim(*y_lim)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.15, linewidth=0.4)
-    ax.set_xlabel('x — 大车道方向 (m)', fontsize=9)
-    ax.set_ylabel('y — 跨距方向 (m)', fontsize=9)
+    ax.set_xlabel('x (m)', fontsize=9)
+    ax.set_ylabel('y (m)', fontsize=9)
 
     if draw_lanes:
         # 集卡侧大车道 (y≈0)
@@ -95,24 +95,27 @@ def draw_bev_scene_background(
             ax.text(x_lim[0] + 2, 0, '大车道\n(集卡侧)', fontsize=6,
                     va='center', color='#666666', alpha=0.8)
 
-        # 集卡车道 (y∈[1.5, 6])
-        ax.axhspan(1.5, 6.0, alpha=0.04, color='blue', zorder=0)
+        # 集卡车道 (geometry.yaml: y∈[-6,-1.5])
+        ax.axhspan(-6.0, -1.5, alpha=0.04, color='blue', zorder=0)
         if draw_labels:
-            ax.text(x_lim[0] + 2, 3.75, '集卡车道', fontsize=6,
+            ax.text(x_lim[0] + 2, -3.75, '集卡车道', fontsize=6,
                     va='center', color='#4477AA', alpha=0.8)
 
-        # 禁行侧大车道 (y≈23.5)
-        ax.axhspan(22.6, 25.0, alpha=0.06, color='gray', zorder=0)
+        # 禁行侧大车道 (geometry.yaml: y≈-23.5)
+        ax.axhspan(-25.6, -22.6, alpha=0.06, color='gray', zorder=0)
         if draw_labels:
-            ax.text(x_lim[0] + 2, 23.8, '大车道\n(禁行侧)', fontsize=6,
+            ax.text(x_lim[0] + 2, -23.8, '大车道\n(禁行侧)', fontsize=6,
                     va='center', color='#666666', alpha=0.8)
 
-        # 集装箱区 (y∈[6, 22.6])
-        for row_y in np.arange(6, 23, 2.6):
+        # 集装箱区 (geometry.yaml: y∈[-22.63,-6])
+        for row_y in np.arange(-22.6, -6.0, 2.6):
             ax.axhline(row_y, color='#8B4513', linewidth=0.25, linestyle='--', alpha=0.3, zorder=0)
         if draw_labels:
-            ax.text(x_lim[0] + 2, 14, '集装箱区', fontsize=6,
+            ax.text(x_lim[0] + 2, -14, '集装箱区', fontsize=6,
                     va='center', color='#8B4513', alpha=0.8)
+
+        # 相邻箱区/中间车道 (+y)
+        ax.axhspan(1.5, 7.0, alpha=0.03, color='cyan', zorder=0)
 
     if draw_rtg:
         # 集卡侧支腿
@@ -126,12 +129,12 @@ def draw_bev_scene_background(
 
         # 禁行侧支腿
         ax.add_patch(Rectangle(
-            (-12.5, 23.0), 13.0, 1.0,
+            (-12.5, -24.0), 13.0, 1.0,
             facecolor='black', alpha=0.30, edgecolor='#333333',
             linewidth=0.6, zorder=2,
         ))
         if draw_labels:
-            ax.text(-6, 24.6, 'RTG 禁行侧', fontsize=5, ha='center', color='black', alpha=0.6)
+            ax.text(-6, -24.8, 'RTG 禁行侧', fontsize=5, ha='center', color='black', alpha=0.6)
 
     # 传感器位置标记
     ax.plot(0, 0, 'r*', markersize=8, markeredgecolor='darkred', markeredgewidth=0.5, zorder=5)

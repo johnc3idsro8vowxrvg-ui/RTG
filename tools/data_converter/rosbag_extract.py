@@ -106,7 +106,7 @@ def _decode_pointcloud2(msg):
     """Decode a sensor_msgs/PointCloud2 message into an (N, 5) float32 array.
 
     Extracts fields: x, y, z, intensity, timestamp (if available).
-    Falls back to (N, 4) or (N, 3) depending on available fields.
+    For Ouster OS1 bags, uses reflectivity as intensity and t as timestamp.
 
     Args:
         msg: sensor_msgs.msg.PointCloud2 message.
@@ -116,14 +116,43 @@ def _decode_pointcloud2(msg):
         Missing fields are filled with zeros.
     """
     from sensor_msgs.point_cloud2 import read_points
-    points_list = list(read_points(msg, skip_nans=True))
+
+    available = {field.name for field in msg.fields}
+    if not {'x', 'y', 'z'}.issubset(available):
+        return np.zeros((0, 5), dtype=np.float32)
+
+    intensity_field = None
+    if 'intensity' in available:
+        intensity_field = 'intensity'
+    elif 'reflectivity' in available:
+        intensity_field = 'reflectivity'
+
+    timestamp_field = None
+    if 'timestamp' in available:
+        timestamp_field = 'timestamp'
+    elif 't' in available:
+        timestamp_field = 't'
+
+    read_fields = ['x', 'y', 'z']
+    if intensity_field is not None:
+        read_fields.append(intensity_field)
+    if timestamp_field is not None:
+        read_fields.append(timestamp_field)
+
+    points_list = list(read_points(msg, field_names=read_fields, skip_nans=True))
     if not points_list:
         return np.zeros((0, 5), dtype=np.float32)
 
     arr = np.array(points_list, dtype=np.float32)
     N = arr.shape[0]
     result = np.zeros((N, 5), dtype=np.float32)
-    result[:, :min(arr.shape[1], 5)] = arr[:, :min(arr.shape[1], 5)]
+    result[:, :3] = arr[:, :3]
+    col = 3
+    if intensity_field is not None:
+        result[:, 3] = arr[:, col]
+        col += 1
+    if timestamp_field is not None:
+        result[:, 4] = arr[:, col]
     return result
 
 
@@ -411,8 +440,7 @@ class RosbagExtractor:
 
         return sync_groups
 
-    @staticmethod
-    def _find_closest(msg_list, ref_ts, used_set):
+    def _find_closest(self, msg_list, ref_ts, used_set):
         """Find the message in msg_list nearest to ref_ts within the sync window.
 
         Args:
@@ -432,12 +460,9 @@ class RosbagExtractor:
             if dt < best_dt:
                 best_dt = dt
                 best = (ts, msg)
-        if best is not None and best_dt <= RosbagExtractor.sync_window_sec:
+        if best is not None and best_dt <= self.sync_window_sec:
             return best
         return None
-
-    # Default sync window (settable per instance), used in _find_closest
-    sync_window_sec = 0.050
 
     # ------------------------------------------------------------------
     # Write frames

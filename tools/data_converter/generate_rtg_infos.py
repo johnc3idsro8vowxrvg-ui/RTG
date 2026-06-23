@@ -237,8 +237,8 @@ def concat_lidar_points(lidar_front_path, lidar_rear_path,
     Returns:
         np.ndarray: Concatenated point cloud (M, 5).
     """
-    pts_front = np.fromfile(lidar_front_path, dtype=np.float32).reshape(-1, 5)
-    pts_rear = np.fromfile(lidar_rear_path, dtype=np.float32).reshape(-1, 5)
+    pts_front = _load_lidar_bin_5d(lidar_front_path)
+    pts_rear = _load_lidar_bin_5d(lidar_rear_path)
 
     if lidar_rear_to_front_R is not None and lidar_rear_to_front_T is not None:
         R = np.array(lidar_rear_to_front_R, dtype=np.float64)
@@ -249,6 +249,23 @@ def concat_lidar_points(lidar_front_path, lidar_rear_path,
         pts_rear[:, :3] = pts_rear_xyz.astype(np.float32)
 
     return np.concatenate([pts_front, pts_rear], axis=0)
+
+
+def _load_lidar_bin_5d(path):
+    """Load legacy 4-d or current 5-d lidar bin as [x,y,z,intensity,timestamp]."""
+    raw = np.fromfile(path, dtype=np.float32)
+    if raw.size == 0:
+        return np.zeros((0, 5), dtype=np.float32)
+
+    if raw.size % 5 == 0:
+        return raw.reshape(-1, 5)
+    if raw.size % 4 == 0:
+        points_4d = raw.reshape(-1, 4)
+        points_5d = np.zeros((points_4d.shape[0], 5), dtype=np.float32)
+        points_5d[:, :4] = points_4d
+        return points_5d
+
+    raise ValueError(f'Cannot infer lidar bin point dimension for {path}: {raw.size} floats')
 
 
 # ---------------------------------------------------------------------------

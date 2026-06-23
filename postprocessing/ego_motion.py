@@ -27,7 +27,7 @@ except ImportError:
     HAS_OPEN3D = False
     logger.warning(
         'Open3D not installed. EgoMotionEstimator will use numpy-only '
-        'degraded mode (no ICP, threshold-based fallback).'
+        'degraded mode (no ICP, robust-center fallback).'
     )
 
 
@@ -150,14 +150,17 @@ class EgoMotionEstimator:
             return result
 
         # 当前帧点云 → Open3D
-        current_cloud = self._to_o3d(static_points)
-
         if self._prev_static_cloud is not None and HAS_OPEN3D:
             # ICP 配准
             prev_cloud = self._to_o3d(self._prev_static_cloud)
+            current_cloud = self._to_o3d(static_points)
             icp_result = self._run_icp(prev_cloud, current_cloud)
             dx = icp_result['translation'][0]
             fitness = icp_result['fitness']
+        elif self._prev_static_cloud is not None:
+            fallback_result = self._run_numpy_fallback(self._prev_static_cloud, static_points)
+            dx = fallback_result['translation'][0]
+            fitness = fallback_result['fitness']
         else:
             # 首帧或无 Open3D: 无法判断
             dx = 0.0
@@ -336,6 +339,48 @@ class EgoMotionEstimator:
             'fitness': float(reg_p2p.fitness),
             'rmse': float(reg_p2p.inlier_rmse),
         }
+
+    def _run_numpy_fallback(
+        self,
+        previous_points: np.ndarray,
+        current_points: np.ndarray,
+    ) -> Dict[str, Any]:
+        """Estimate frame shift without Open3D.
+
+        This is intentionally simpler than ICP: it compares robust centers of
+        the static point sets and only feeds coarse x-direction into the state
+        classifier. It keeps offline bag analysis usable in lightweight
+        environments while preserving ICP as the preferred implementation.
+        """
+        if previous_points.shape[0] == 0 or current_points.shape[0] == 0:
+            return {'translation': (0.0, 0.0, 0.0), 'fitness': 0.0, 'rmse': 0.0}
+
+        prev_center = self._robust_xy_center(previous_points)
+        current_center = self._robust_xy_center(current_points)
+        dx = float(current_center[0] - prev_center[0])
+        dy = float(current_center[1] - prev_center[1])
+
+        fallback_fitness = float(self.config.get('numpy_fallback_fitness', 0.5))
+        fallback_fitness = max(0.0, min(1.0, fallback_fitness))
+
+        return {
+            'translation': (dx, dy, 0.0),
+            'fitness': fallback_fitness,
+            'rmse': 0.0,
+        }
+
+    @staticmethod
+    def _robust_xy_center(points: np.ndarray) -> np.ndarray:
+        coords = points[:, :2]
+        if coords.shape[0] <= 4:
+            return np.median(coords, axis=0)
+
+        low, high = np.percentile(coords, [10, 90], axis=0)
+        mask = np.all((coords >= low) & (coords <= high), axis=1)
+        trimmed = coords[mask]
+        if trimmed.shape[0] == 0:
+            trimmed = coords
+        return np.median(trimmed, axis=0)
 
     # ------------------------------------------------------------------
     # Classification

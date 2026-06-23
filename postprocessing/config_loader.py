@@ -75,7 +75,7 @@ class ConfigLoader:
     def load_all(self) -> None:
         """加载并验证全部配置文件。"""
         with self._lock:
-            self._calib = self._load_yaml('calib.yaml', required=True)
+            self._calib = self._load_calib()
             self._geometry = self._load_yaml('geometry.yaml', required=True)
             self._warning = self._load_yaml('warning.yaml', required=True)
             self._system = self._load_yaml('system.yaml', required=True)
@@ -209,6 +209,27 @@ class ConfigLoader:
             data = {}
         logger.debug('Loaded config: %s', filepath)
         return data
+
+    def _load_calib(self) -> Dict[str, Any]:
+        """加载标定配置。
+
+        现场部署优先使用 calib.yaml；开发/回放环境允许回退到仓库内提交的
+        calib_from_bag.yaml 或 calib_synthetic.yaml，避免主节点在没有现场标定
+        文件时完全无法启动。
+        """
+        candidates = ('calib.yaml', 'calib_from_bag.yaml', 'calib_synthetic.yaml')
+        for filename in candidates:
+            filepath = os.path.join(self._config_dir, filename)
+            if os.path.exists(filepath):
+                if filename != 'calib.yaml':
+                    logger.warning(
+                        'calib.yaml not found; using fallback calibration %s',
+                        filepath,
+                    )
+                return self._load_yaml(filename, required=True)
+        raise ConfigNotFoundError(
+            f'Config file not found: {os.path.join(self._config_dir, "calib.yaml")}'
+        )
 
     # ------------------------------------------------------------------
     # 内部: 验证
