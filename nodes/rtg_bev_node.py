@@ -90,6 +90,7 @@ class SensorBuffer:
 
     def __init__(self, maxlen: int = 10):
         self._buffer = deque(maxlen=maxlen)
+        self._last_emitted_lidar_pair_time: Optional[float] = None
 
     def add(self, msg, ts: float, sensor_key: str) -> None:
         self._buffer.append({
@@ -120,6 +121,7 @@ class SensorBuffer:
             anchor = buffer_list[i]
             anchor_ts = anchor['timestamp']
             group = {anchor['sensor']: anchor['msg']}
+            group_ts = {anchor['sensor']: anchor_ts}
 
             for j in range(len(buffer_list)):
                 if j == i:
@@ -128,9 +130,17 @@ class SensorBuffer:
                 if abs(entry['timestamp'] - anchor_ts) <= window:
                     if entry['sensor'] not in group:
                         group[entry['sensor']] = entry['msg']
+                        group_ts[entry['sensor']] = entry['timestamp']
 
             # V1 LiDAR-only 闭环需要 L1/L2；相机是可视化/扩展输入。
             if 'lidar_01' in group and 'lidar_02' in group:
+                pair_time = max(group_ts['lidar_01'], group_ts['lidar_02'])
+                if (
+                    self._last_emitted_lidar_pair_time is not None and
+                    pair_time <= self._last_emitted_lidar_pair_time + 1e-9
+                ):
+                    return None
+                self._last_emitted_lidar_pair_time = pair_time
                 return {
                     **group,
                     'timestamp': anchor_ts,

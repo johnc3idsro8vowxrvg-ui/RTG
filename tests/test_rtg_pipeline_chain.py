@@ -104,6 +104,28 @@ def test_sensor_buffer_sync_requires_l1_l2_not_camera():
     assert frame["lidar_02"] == "rear"
 
 
+def test_sensor_buffer_does_not_emit_same_lidar_pair_twice():
+    from nodes.rtg_bev_node import SensorBuffer
+
+    buffer = SensorBuffer(maxlen=10)
+    buffer.add("front-1", 10.00, "lidar_01")
+    buffer.add("rear-1", 10.02, "lidar_02")
+
+    assert buffer.get_synced_frame(window=0.05) is not None
+    assert buffer.get_synced_frame(window=0.05) is None
+
+    buffer.add("camera-only", 10.03, "camera_01")
+    assert buffer.get_synced_frame(window=0.05) is None
+
+    buffer.add("front-2", 10.10, "lidar_01")
+    buffer.add("rear-2", 10.12, "lidar_02")
+    frame = buffer.get_synced_frame(window=0.05)
+
+    assert frame is not None
+    assert frame["lidar_01"] == "front-2"
+    assert frame["lidar_02"] == "rear-2"
+
+
 def test_extract_timestamp_rejects_device_internal_time(monkeypatch):
     import nodes.rtg_bev_node as node_mod
 
@@ -241,6 +263,35 @@ def test_bag_analysis_pointcloud_decode_respects_row_step_padding():
         np.array([point for row in rows for point in row], dtype=np.float32),
     )
     np.testing.assert_allclose(decoded[:, 4], 0.0)
+
+
+def test_tracker_empty_detection_update_counts_one_miss():
+    from postprocessing.tracker import Tracker
+
+    tracker = Tracker(
+        {
+            "min_hits_confirm": 1,
+            "publish_internal_tracks": True,
+            "max_age_lost": 5,
+        }
+    )
+    det = {
+        "class_id": 0,
+        "confidence": 0.9,
+        "x": 1.0,
+        "y": 2.0,
+        "z": 0.5,
+        "w": 0.8,
+        "l": 0.8,
+        "h": 1.7,
+        "yaw": 0.0,
+    }
+
+    tracker.update([det], timestamp=1.0)
+    tracks = tracker.update([], timestamp=1.1)
+
+    assert len(tracks) == 1
+    assert tracks[0]["time_since_update"] == 1
 
 
 def test_generate_infos_concat_accepts_legacy_four_column_bins(tmp_path):

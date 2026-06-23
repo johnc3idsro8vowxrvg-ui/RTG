@@ -139,7 +139,6 @@ class KalmanBoxTracker:
 
     def mark_missed(self) -> None:
         """标记本帧未匹配。"""
-        self.time_since_update += 1
         if self.time_since_update > 5 and self.state == _StateConst.CONFIRMED:
             self.state = _StateConst.LOST
 
