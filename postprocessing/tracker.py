@@ -395,7 +395,7 @@ class Tracker:
             trk.predict_with_dt(dt)
 
         # 2) 计算 IoU 成本矩阵
-        cost = self._iou_cost_matrix(self._tracks, det_boxes)
+        cost = self._iou_cost_matrix(self._tracks, det_boxes, dets)
 
         # 3) 贪婪匹配
         iou_thresh = self.config.get('iou_threshold', 0.1)
@@ -501,8 +501,9 @@ class Tracker:
         self,
         tracks: Dict[int, KalmanBoxTracker],
         det_boxes: List[np.ndarray],
+        detections: List[Dict],
     ) -> np.ndarray:
-        """计算轨迹预测框与检测框的 IoU 成本矩阵。"""
+        """Calculate IoU cost matrix, disallowing cross-class matches."""
         num_tracks = len(tracks)
         num_dets = len(det_boxes)
         if num_tracks == 0 or num_dets == 0:
@@ -512,8 +513,12 @@ class Tracker:
         for i, trk in enumerate(tracks.values()):
             pred_box = trk.get_bbox()
             for j, det_box in enumerate(det_boxes):
+                det_class = int(detections[j].get('class_id', trk.class_id))
+                if int(trk.class_id) != det_class:
+                    cost[i, j] = np.inf
+                    continue
                 iou = bbox_bev_iou(pred_box, det_box)
-                cost[i, j] = 1.0 - iou  # 成本 = 1 - IoU
+                cost[i, j] = 1.0 - iou
         return cost
 
     @staticmethod

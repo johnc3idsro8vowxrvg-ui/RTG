@@ -176,6 +176,23 @@ def test_preprocess_lidar_merges_l1_l2_arrays_in_bev_frame(tmp_path, monkeypatch
     np.testing.assert_allclose(merged[1], [-7.0, 3.0, 0.3, 0.7, 0.02])
 
 
+def test_preprocess_lidar_does_not_mutate_source_arrays(tmp_path, monkeypatch):
+    from nodes.rtg_bev_node import RTGBEVNode
+
+    _copy_runtime_configs(tmp_path)
+    monkeypatch.setattr(RTGBEVNode, "_load_model", lambda self: None)
+
+    node = RTGBEVNode(config_dir=str(tmp_path))
+    lidar_01 = np.array([[20.0, 5.0, 0.2, 0.4, 0.01]], dtype=np.float32)
+    lidar_02 = np.array([[5.0, 3.0, 0.3, 0.7, 0.02]], dtype=np.float32)
+    lidar_01_before = lidar_01.copy()
+    lidar_02_before = lidar_02.copy()
+
+    node._preprocess_lidar({"lidar_01": lidar_01, "lidar_02": lidar_02})
+
+    np.testing.assert_allclose(lidar_01, lidar_01_before)
+    np.testing.assert_allclose(lidar_02, lidar_02_before)
+
 def test_preprocess_lidar_returns_empty_five_column_cloud(tmp_path, monkeypatch):
     from nodes.rtg_bev_node import RTGBEVNode
 
@@ -306,6 +323,41 @@ def test_tracker_empty_detection_update_counts_one_miss():
     assert len(tracks) == 1
     assert tracks[0]["time_since_update"] == 1
 
+
+def test_tracker_does_not_match_different_classes_at_same_location():
+    from postprocessing.tracker import Tracker
+
+    tracker = Tracker(
+        {
+            "min_hits_confirm": 1,
+            "publish_internal_tracks": True,
+            "iou_threshold": 0.1,
+            "max_age_lost": 5,
+        }
+    )
+    person = {
+        "class_id": 0,
+        "confidence": 0.95,
+        "x": 1.0,
+        "y": 2.0,
+        "z": 0.5,
+        "w": 0.8,
+        "l": 0.8,
+        "h": 1.7,
+        "yaw": 0.0,
+    }
+    truck = {**person, "class_id": 1}
+
+    first = tracker.update([person], timestamp=1.0)
+    person_id = first[0]["track_id"]
+    second = tracker.update([truck], timestamp=1.1)
+
+    assert len(second) == 2
+    by_class = {track["class_id"]: track for track in second}
+    assert by_class[0]["track_id"] == person_id
+    assert by_class[0]["time_since_update"] == 1
+    assert by_class[1]["track_id"] != person_id
+    assert by_class[1]["hits"] == 1
 
 def test_generate_infos_concat_accepts_legacy_four_column_bins(tmp_path):
     from tools.data_converter.generate_rtg_infos import concat_lidar_points
