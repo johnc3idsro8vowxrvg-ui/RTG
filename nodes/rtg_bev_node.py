@@ -890,6 +890,11 @@ class RTGBEVNode:
             ego_msg = _build_ego_motion_state(output['ego_motion'])
             self._publishers['ego_motion'].publish(ego_msg)
 
+        # diagnostics
+        if 'diagnostics' in self._publishers:
+            diag_msg = _build_diagnostics_array(output.get('diagnostics', {}), ts)
+            self._publishers['diagnostics'].publish(diag_msg)
+
     # ------------------------------------------------------------------
     # 运行循环
     # ------------------------------------------------------------------
@@ -1306,6 +1311,81 @@ def _as_str(value: Any, default: str = '') -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _make_diagnostic_msg_classes():
+    try:
+        from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+        return DiagnosticArray, DiagnosticStatus, KeyValue
+    except ImportError:
+        from rtg_bev_msgs import Header
+
+        class KeyValue:
+            def __init__(self):
+                self.key = ''
+                self.value = ''
+
+        class DiagnosticStatus:
+            OK = 0
+            WARN = 1
+            ERROR = 2
+            STALE = 3
+
+            def __init__(self):
+                self.level = self.OK
+                self.name = ''
+                self.message = ''
+                self.hardware_id = ''
+                self.values = []
+
+        class DiagnosticArray:
+            def __init__(self):
+                self.header = Header()
+                self.status = []
+
+        return DiagnosticArray, DiagnosticStatus, KeyValue
+
+
+def _diagnostic_key_value(key: str, value: Any, KeyValueType: Any) -> Any:
+    item = KeyValueType()
+    item.key = _as_str(key)
+    item.value = _as_str(value)
+    return item
+
+
+def _build_diagnostics_array(
+    diagnostics: Dict[str, Any],
+    timestamp: float,
+) -> Any:
+    """Build a DiagnosticArray message for node health reporting."""
+    DiagnosticArray, DiagnosticStatus, KeyValue = _make_diagnostic_msg_classes()
+    msg = DiagnosticArray()
+    msg.header.stamp = _to_ros_time(timestamp)
+    msg.header.frame_id = 'rtg_bev_origin'
+
+    status = DiagnosticStatus()
+    anomalies = [_as_str(item) for item in diagnostics.get('anomalies', [])]
+    status.level = DiagnosticStatus.WARN if anomalies else DiagnosticStatus.OK
+    status.name = 'rtg_bev_node'
+    status.message = '; '.join(anomalies) if anomalies else 'ok'
+    status.hardware_id = 'rtg_bev'
+
+    values = [
+        ('uptime_seconds', _as_float(diagnostics.get('uptime_seconds', 0.0))),
+        ('inference_latency_ms', _as_float(diagnostics.get('inference_latency_ms', 0.0))),
+        ('output_fps', _as_float(diagnostics.get('output_fps', 0.0))),
+        ('calib_status', _as_str(diagnostics.get('calib_status', 'unknown'))),
+    ]
+    for sensor_key, fps in diagnostics.get('sensor_fps', {}).items():
+        values.append((f'sensor_fps.{sensor_key}', _as_float(fps)))
+
+    status.values = [
+        _diagnostic_key_value(key, value, KeyValue)
+        for key, value in values
+    ]
+    msg.status.append(status)
+    return msg
+
 
 def _build_detection_array(
     detections: List[Dict],

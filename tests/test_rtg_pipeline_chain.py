@@ -773,6 +773,52 @@ def test_ros_message_builders_cast_numpy_scalars_to_python_types():
     assert type(ego_msg.state) is int
     assert type(ego_msg.confidence) is float
 
+
+def test_publish_sends_diagnostics_when_publisher_exists(tmp_path, monkeypatch):
+    from nodes.rtg_bev_node import RTGBEVNode
+
+    class FakePublisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, msg):
+            self.messages.append(msg)
+
+    _copy_runtime_configs(tmp_path)
+    monkeypatch.setattr(RTGBEVNode, "_load_model", lambda self: None)
+    node = RTGBEVNode(config_dir=str(tmp_path))
+    diagnostics_pub = FakePublisher()
+    node._ros_initialized = True
+    node._publishers = {"diagnostics": diagnostics_pub}
+
+    node.publish(
+        {
+            "timestamp": np.float64(125.0),
+            "diagnostics": {
+                "uptime_seconds": np.float32(2.5),
+                "sensor_fps": {"lidar_01": np.float32(10.0)},
+                "inference_latency_ms": np.float32(23.0),
+                "output_fps": np.float32(9.5),
+                "calib_status": "ok",
+                "anomalies": ["late_lidar_02"],
+            },
+        }
+    )
+
+    assert len(diagnostics_pub.messages) == 1
+    msg = diagnostics_pub.messages[0]
+    assert msg.header.frame_id == "rtg_bev_origin"
+    assert type(msg.header.stamp) is float
+    assert len(msg.status) == 1
+    status = msg.status[0]
+    assert status.name == "rtg_bev_node"
+    assert status.level > 0
+    assert status.message == "late_lidar_02"
+    values = {item.key: item.value for item in status.values}
+    assert values["calib_status"] == "ok"
+    assert values["sensor_fps.lidar_01"] == "10.0"
+
+
 def test_process_frame_runs_detection_tracking_warning_and_bev_debug(tmp_path, monkeypatch):
     from nodes.rtg_bev_node import RTGBEVNode
 
