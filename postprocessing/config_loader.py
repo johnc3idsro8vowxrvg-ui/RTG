@@ -180,6 +180,10 @@ class ConfigLoader:
         """返回传感器配置。"""
         return self._system.get('sensors', {})
 
+    def get_tracking_config(self) -> Dict[str, Any]:
+        """Return tracker configuration."""
+        return self._system.get('tracking', {})
+
     def get_performance_targets(self) -> Dict[str, float]:
         """返回性能目标配置。"""
         return self._system.get('performance_targets', {})

@@ -820,6 +820,50 @@ def test_process_frame_runs_detection_tracking_warning_and_bev_debug(tmp_path, m
     assert len(list((tmp_path / "bev").glob("*.png"))) == 3
 
 
+def test_node_uses_tracking_config_from_system_yaml(tmp_path, monkeypatch):
+    from nodes.rtg_bev_node import RTGBEVNode
+
+    _copy_runtime_configs(tmp_path)
+    system_path = tmp_path / "system.yaml"
+    system_cfg = yaml.safe_load(system_path.read_text(encoding="utf-8"))
+    system_cfg["tracking"] = {
+        "iou_threshold": 0.1,
+        "max_age_lost": 5,
+        "min_hits_confirm": 1,
+        "min_confidence": 0.2,
+        "publish_internal_tracks": True,
+    }
+    system_path.write_text(yaml.safe_dump(system_cfg, allow_unicode=True), encoding="utf-8")
+
+    monkeypatch.setattr(RTGBEVNode, "_load_model", lambda self: None)
+    node = RTGBEVNode(config_dir=str(tmp_path))
+    node._run_inference = lambda points, images, timestamp: [
+        {
+            "class_id": 0,
+            "class_name": "person",
+            "confidence": 0.95,
+            "x": 4.0,
+            "y": 0.0,
+            "z": 0.8,
+            "w": 0.8,
+            "l": 0.8,
+            "h": 1.7,
+            "yaw": 0.0,
+        }
+    ]
+
+    output = node.process_frame(
+        {
+            "timestamp": 100.0,
+            "lidar_01": np.array([[20.0, 5.0, 0.2, 0.5, 0.0]], dtype=np.float32),
+            "lidar_02": np.array([[10.0, 4.0, 0.2, 0.7, 0.0]], dtype=np.float32),
+        }
+    )
+
+    assert len(output["tracks"]) == 1
+    assert output["tracks"][0]["state_name"] == "confirmed"
+    assert output["tracks"][0]["track_id"] >= 0
+
 def test_warning_immediate_danger_overrides_confirmation(tmp_path):
     from postprocessing.config_loader import ConfigLoader
     from postprocessing.constants import EgoMotionState, WarningLevel

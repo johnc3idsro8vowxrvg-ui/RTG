@@ -265,7 +265,7 @@ class RTGBEVNode:
         self._perf_targets = self._config.get_performance_targets()
 
         # 初始化模块
-        self._tracker = Tracker()
+        self._tracker = Tracker(self._config.get_tracking_config())
         self._ego_motion = EgoMotionEstimator()
         self._warning_engine = WarningEngine(self._config)
         self._diagnostics = DiagnosticsCollector()
