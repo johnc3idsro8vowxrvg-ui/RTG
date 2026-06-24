@@ -1284,6 +1284,29 @@ def _make_set_param_srv():
 # ---------------------------------------------------------------------------
 # 消息构建辅助函数
 # ---------------------------------------------------------------------------
+def _as_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _as_str(value: Any, default: str = '') -> str:
+    if value is None:
+        return default
+    return str(value)
+
 def _build_detection_array(
     detections: List[Dict],
     timestamp: float,
@@ -1297,20 +1320,20 @@ def _build_detection_array(
 
     for i, det in enumerate(detections):
         d = Detection()
-        d.id = i
-        d.class_id = det.get('class_id', 0)
-        d.class_name = det.get('class_name', '')
-        d.confidence = det.get('confidence', 0.0)
-        d.x = det.get('x', 0.0)
-        d.y = det.get('y', 0.0)
-        d.z = det.get('z', 0.0)
-        d.w = det.get('w', 0.0)
-        d.l = det.get('l', 0.0)
-        d.h = det.get('h', 0.0)
-        d.yaw = det.get('yaw', 0.0)
-        d.vx = det.get('vx', 0.0)
-        d.vy = det.get('vy', 0.0)
-        d.distance = det.get('distance', 0.0)
+        d.id = _as_int(i)
+        d.class_id = _as_int(det.get('class_id', 0))
+        d.class_name = _as_str(det.get('class_name', ''))
+        d.confidence = _as_float(det.get('confidence', 0.0))
+        d.x = _as_float(det.get('x', 0.0))
+        d.y = _as_float(det.get('y', 0.0))
+        d.z = _as_float(det.get('z', 0.0))
+        d.w = _as_float(det.get('w', 0.0))
+        d.l = _as_float(det.get('l', 0.0))
+        d.h = _as_float(det.get('h', 0.0))
+        d.yaw = _as_float(det.get('yaw', 0.0))
+        d.vx = _as_float(det.get('vx', 0.0))
+        d.vy = _as_float(det.get('vy', 0.0))
+        d.distance = _as_float(det.get('distance', 0.0))
         msg.detections.append(d)
 
     return msg
@@ -1329,19 +1352,19 @@ def _build_track_array(
 
     for trk in tracks:
         t = Track()
-        t.track_id = trk.get('track_id', -1)
-        t.class_id = trk.get('class_id', 0)
-        t.age = trk.get('age', 0)
-        t.x = trk.get('x', 0.0)
-        t.y = trk.get('y', 0.0)
-        t.z = trk.get('z', 0.0)
-        t.vx = trk.get('vx', 0.0)
-        t.vy = trk.get('vy', 0.0)
-        t.w = trk.get('w', 0.0)
-        t.l = trk.get('l', 0.0)
-        t.h = trk.get('h', 0.0)
-        t.yaw = trk.get('yaw', 0.0)
-        t.state = trk.get('state', 0)
+        t.track_id = _as_int(trk.get('track_id', -1), -1)
+        t.class_id = _as_int(trk.get('class_id', 0))
+        t.age = _as_int(trk.get('age', 0))
+        t.x = _as_float(trk.get('x', 0.0))
+        t.y = _as_float(trk.get('y', 0.0))
+        t.z = _as_float(trk.get('z', 0.0))
+        t.vx = _as_float(trk.get('vx', 0.0))
+        t.vy = _as_float(trk.get('vy', 0.0))
+        t.w = _as_float(trk.get('w', 0.0))
+        t.l = _as_float(trk.get('l', 0.0))
+        t.h = _as_float(trk.get('h', 0.0))
+        t.yaw = _as_float(trk.get('yaw', 0.0))
+        t.state = _as_int(trk.get('state', 0))
         msg.tracks.append(t)
 
     return msg
@@ -1357,26 +1380,26 @@ def _build_warning_array(
     msg.header = Header()
     msg.header.stamp = _to_ros_time(timestamp)
     msg.header.frame_id = 'rtg_bev_origin'
-    msg.ego_motion_state = output.get('ego_motion', {}).get('state', 3)
+    msg.ego_motion_state = _as_int(output.get('ego_motion', {}).get('state', 3), 3)
 
     for w in output.get('warnings', []):
         wrn = Warning()
-        wrn.track_id = w.get('track_id', -1)
-        wrn.warning_level = w.get('warning_level', 0)
-        wrn.target_class = w.get('target_class', 0)
-        wrn.distance = w.get('distance', 0.0)
-        wrn.zone = w.get('zone', '')
-        wrn.trigger_reason = w.get('trigger_reason', '')
+        wrn.track_id = _as_int(w.get('track_id', -1), -1)
+        wrn.warning_level = _as_int(w.get('warning_level', 0))
+        wrn.target_class = _as_int(w.get('target_class', 0))
+        wrn.distance = _as_float(w.get('distance', 0.0))
+        wrn.zone = _as_str(w.get('zone', ''))
+        wrn.trigger_reason = _as_str(w.get('trigger_reason', ''))
         wrn.trigger_time = _to_ros_time(w.get('trigger_time', timestamp))
         msg.warnings.append(wrn)
 
     for zone in output.get('active_zones', []):
         wz = WarningZone()
-        wz.name = zone.get('name', '')
-        wz.weight = zone.get('weight', 0.0)
-        wz.y_min = zone.get('y_min', 0.0)
-        wz.y_max = zone.get('y_max', 0.0)
-        wz.description = zone.get('description', '')
+        wz.name = _as_str(zone.get('name', ''))
+        wz.weight = _as_float(zone.get('weight', 0.0))
+        wz.y_min = _as_float(zone.get('y_min', 0.0))
+        wz.y_max = _as_float(zone.get('y_max', 0.0))
+        wz.description = _as_str(zone.get('description', ''))
         msg.active_zones.append(wz)
 
     return msg
@@ -1386,18 +1409,18 @@ def _build_ego_motion_state(ego_result: Dict[str, Any]) -> Any:
     """构建 EgoMotionState ROS1 消息。"""
     from rtg_bev_msgs import EgoMotionState as EgoMsg
     msg = EgoMsg()
-    msg.state = ego_result.get('state', 3)
-    msg.confidence = ego_result.get('confidence', 0.0)
-    msg.displacement = ego_result.get('displacement', 0.0)
-    msg.velocity_estimate = ego_result.get('velocity_estimate', 0.0)
+    msg.state = _as_int(ego_result.get('state', 3), 3)
+    msg.confidence = _as_float(ego_result.get('confidence', 0.0))
+    msg.displacement = _as_float(ego_result.get('displacement', 0.0))
+    msg.velocity_estimate = _as_float(ego_result.get('velocity_estimate', 0.0))
     return msg
 
 
 def _to_ros_time(timestamp: float) -> Any:
     """float timestamp → rospy.Time。"""
     if ROS_AVAILABLE and rospy is not None:
-        return rospy.Time.from_sec(timestamp)
-    return timestamp
+        return rospy.Time.from_sec(_as_float(timestamp))
+    return _as_float(timestamp)
 
 
 # ==============================================================================

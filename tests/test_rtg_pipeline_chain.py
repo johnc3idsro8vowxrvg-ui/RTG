@@ -668,6 +668,111 @@ def test_centerpoint_datasets_package_imports():
     assert callable(build_dataset)
 
 
+def test_ros_message_builders_cast_numpy_scalars_to_python_types():
+    from nodes.rtg_bev_node import (
+        _build_detection_array,
+        _build_ego_motion_state,
+        _build_track_array,
+        _build_warning_array,
+    )
+
+    det_msg = _build_detection_array(
+        [
+            {
+                "class_id": np.int64(2),
+                "class_name": "car",
+                "confidence": np.float32(0.9),
+                "x": np.float32(1.0),
+                "y": np.float32(2.0),
+                "z": np.float32(0.5),
+                "w": np.float32(1.8),
+                "l": np.float32(4.2),
+                "h": np.float32(1.6),
+                "yaw": np.float32(0.1),
+                "vx": np.float32(0.2),
+                "vy": np.float32(-0.1),
+                "distance": np.float32(3.5),
+            }
+        ],
+        np.float64(123.5),
+    )
+    det = det_msg.detections[0]
+    assert type(det_msg.header.stamp) is float
+    assert type(det.id) is int
+    assert type(det.class_id) is int
+    assert type(det.confidence) is float
+    assert type(det.x) is float
+
+    trk_msg = _build_track_array(
+        [
+            {
+                "track_id": np.int64(4),
+                "class_id": np.int64(1),
+                "age": np.int64(6),
+                "x": np.float32(1.0),
+                "y": np.float32(2.0),
+                "z": np.float32(0.5),
+                "vx": np.float32(0.2),
+                "vy": np.float32(-0.1),
+                "w": np.float32(2.5),
+                "l": np.float32(6.0),
+                "h": np.float32(2.8),
+                "yaw": np.float32(0.2),
+                "state": np.int64(1),
+            }
+        ],
+        np.float64(124.0),
+    )
+    trk = trk_msg.tracks[0]
+    assert type(trk.track_id) is int
+    assert type(trk.x) is float
+    assert type(trk.state) is int
+
+    warning_msg = _build_warning_array(
+        {
+            "ego_motion": {"state": np.int64(3)},
+            "warnings": [
+                {
+                    "track_id": np.int64(4),
+                    "warning_level": np.int64(3),
+                    "target_class": np.int64(1),
+                    "distance": np.float32(3.0),
+                    "zone": "nearest_leg",
+                    "trigger_reason": "distance",
+                    "trigger_time": np.float64(124.1),
+                }
+            ],
+            "active_zones": [
+                {
+                    "name": "zone_a",
+                    "weight": np.float32(1.0),
+                    "y_min": np.float32(-2.0),
+                    "y_max": np.float32(2.0),
+                    "description": "test",
+                }
+            ],
+        },
+        np.float64(124.0),
+    )
+    warning = warning_msg.warnings[0]
+    zone = warning_msg.active_zones[0]
+    assert type(warning_msg.ego_motion_state) is int
+    assert type(warning.track_id) is int
+    assert type(warning.distance) is float
+    assert type(warning.trigger_time) is float
+    assert type(zone.weight) is float
+
+    ego_msg = _build_ego_motion_state(
+        {
+            "state": np.int64(2),
+            "confidence": np.float32(0.8),
+            "displacement": np.float32(1.2),
+            "velocity_estimate": np.float32(0.4),
+        }
+    )
+    assert type(ego_msg.state) is int
+    assert type(ego_msg.confidence) is float
+
 def test_process_frame_runs_detection_tracking_warning_and_bev_debug(tmp_path, monkeypatch):
     from nodes.rtg_bev_node import RTGBEVNode
 
