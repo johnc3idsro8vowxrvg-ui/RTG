@@ -887,6 +887,7 @@ def test_process_frame_runs_detection_tracking_warning_and_bev_debug(tmp_path, m
     assert len(output["tracks"]) == 1
     assert output["warnings"][0]["warning_level"] == 3
     assert len(list((tmp_path / "bev").glob("*.png"))) == 3
+    assert Path(output["debug"]["bev_image_path"]).exists()
 
 
 def test_node_uses_tracking_config_from_system_yaml(tmp_path, monkeypatch):

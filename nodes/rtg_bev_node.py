@@ -511,7 +511,9 @@ class RTGBEVNode:
             'latency_ms': latency_ms,
         }
 
-        self._maybe_save_bev_debug(output, lidar_points)
+        bev_debug_path = self._maybe_save_bev_debug(output, lidar_points)
+        if bev_debug_path is not None:
+            output.setdefault('debug', {})['bev_image_path'] = bev_debug_path
 
         # 调试日志
         logger.debug(
@@ -796,18 +798,18 @@ class RTGBEVNode:
         self,
         output: Dict[str, Any],
         lidar_points: np.ndarray,
-    ) -> None:
-        """Save lightweight BEV debug PNGs when debug.bev_visualization.enabled."""
+    ) -> Optional[str]:
+        """Save lightweight BEV debug PNGs and return the generated path."""
         debug_cfg = self._system_cfg.get('debug', {}).get('bev_visualization', {})
         if not debug_cfg.get('enabled', False):
-            return
+            return None
 
         save_every = int(debug_cfg.get('save_every_n_frames', 10))
         if save_every <= 0:
             save_every = 10
         self._debug_frame_index += 1
         if self._debug_frame_index % save_every != 0:
-            return
+            return None
 
         try:
             import matplotlib
@@ -857,8 +859,10 @@ class RTGBEVNode:
             path = os.path.join(save_dir, f"bev_{self._debug_frame_index:06d}.png")
             fig.savefig(path, dpi=140)
             plt.close(fig)
+            return path
         except Exception as e:
             logger.warning('Failed to save BEV debug visualization: %s', e)
+            return None
 
     # ------------------------------------------------------------------
     # 发布
