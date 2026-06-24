@@ -100,7 +100,8 @@ class KalmanBoxTracker:
     # Update
     # ------------------------------------------------------------------
     def update(self, bbox: np.ndarray, class_id: int = 0,
-               confidence: float = 0.0, min_hits_confirm: int = 3) -> None:
+               confidence: float = 0.0, min_hits_confirm: int = 3,
+               dt: float = 1.0) -> None:
         """用观测更新卡尔曼状态。
 
         Parameters
@@ -111,6 +112,8 @@ class KalmanBoxTracker:
             当前帧检测置信度 (0~1)
         min_hits_confirm : int
             Hits required to promote a candidate track to confirmed.
+        dt : float
+            Seconds since the previous matched observation.
         """
         self.hits += 1
         self.time_since_update = 0
@@ -131,7 +134,7 @@ class KalmanBoxTracker:
             old_x, old_y = self._x_hat[0], self._x_hat[1]
             alpha = 0.7
             self._x_hat[:7] = alpha * bbox + (1 - alpha) * self._x_hat[:7]
-            dt_v = max(self.time_since_update or 1, 1)
+            dt_v = max(float(dt), 1e-4)
             self._x_hat[7] = (bbox[0] - old_x) / dt_v
             self._x_hat[8] = (bbox[1] - old_y) / dt_v
 
@@ -413,7 +416,8 @@ class Tracker:
             cls_id = dets[det_idx].get('class_id', 0)
             conf = dets[det_idx].get('confidence', 0.0)
             trk.update(
-                bbox, class_id=cls_id, confidence=conf, min_hits_confirm=min_hits
+                bbox, class_id=cls_id, confidence=conf,
+                min_hits_confirm=min_hits, dt=dt
             )
 
         # 5) 标记未匹配的轨迹

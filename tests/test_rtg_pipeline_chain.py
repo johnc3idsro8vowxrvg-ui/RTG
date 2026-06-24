@@ -324,6 +324,38 @@ def test_tracker_empty_detection_update_counts_one_miss():
     assert tracks[0]["time_since_update"] == 1
 
 
+def test_tracker_fallback_velocity_uses_timestamp_dt(monkeypatch):
+    import postprocessing.tracker as tracker_mod
+    from postprocessing.tracker import Tracker
+
+    monkeypatch.setattr(tracker_mod, "HAS_FILTERPY", False)
+
+    tracker = Tracker(
+        {
+            "min_hits_confirm": 1,
+            "publish_internal_tracks": True,
+            "iou_threshold": 0.1,
+        }
+    )
+    first = {
+        "class_id": 0,
+        "confidence": 0.95,
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.5,
+        "w": 1.0,
+        "l": 1.0,
+        "h": 1.7,
+        "yaw": 0.0,
+    }
+    second = {**first, "x": 0.2}
+
+    tracker.update([first], timestamp=1.0)
+    tracks = tracker.update([second], timestamp=1.1)
+
+    assert len(tracks) == 1
+    assert tracks[0]["vx"] == pytest.approx(2.0)
+
 def test_tracker_min_hits_confirm_controls_track_state():
     from postprocessing.tracker import Tracker
 
