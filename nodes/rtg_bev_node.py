@@ -278,7 +278,7 @@ class RTGBEVNode:
         self._model: Any = None
         self._model_ready = False
         self._cached_img_metas: Any = None
-        self._model_class_names = list(RTG_CLASS_NAME_TO_ID.keys())
+        self._model_class_names = list(NUSC_CLASSES)
         self._torch_device: Any = None
         self._model_fp16 = False
         try:
@@ -1050,14 +1050,13 @@ def _map_model_label_to_rtg_class(
     class_names: Optional[List[str]] = None,
 ) -> Tuple[int, str]:
     rtg_names = list(RTG_CLASS_NAME_TO_ID.keys())
+    label_names = class_names if class_names else NUSC_CLASSES
     source_name = None
 
-    if class_names and 0 <= label < len(class_names):
-        source_name = class_names[label]
+    if 0 <= label < len(label_names):
+        source_name = label_names[label]
     elif 0 <= label < len(rtg_names):
         source_name = rtg_names[label]
-    elif 0 <= label < len(NUSC_CLASSES):
-        source_name = NUSC_CLASSES[label]
 
     if source_name in RTG_CLASS_NAME_TO_ID:
         rtg_name = source_name

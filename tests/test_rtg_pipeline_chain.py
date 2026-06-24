@@ -522,6 +522,25 @@ def test_centerpoint_result_parser_maps_nuscenes_pedestrian_label():
     assert detections[0]["vy"] == 0.0
 
 
+def test_centerpoint_result_parser_defaults_to_nuscenes_labels():
+    from nodes.rtg_bev_node import _centerpoint_results_to_detections
+
+    result = [
+        {
+            "box3d_lidar": np.array(
+                [[1.0, 2.0, 0.5, 1.8, 4.2, 1.6, 0.0]],
+                dtype=np.float32,
+            ),
+            "scores": np.array([0.9], dtype=np.float32),
+            "label_preds": np.array([0], dtype=np.int64),
+        }
+    ]
+
+    detections = _centerpoint_results_to_detections(result, score_thr=0.1)
+
+    assert detections[0]["class_id"] == 2
+    assert detections[0]["class_name"] == "car"
+
 def test_centerpoint_coordinates_include_batch_index():
     from nodes.rtg_bev_node import _add_batch_index_to_coordinates
 
