@@ -104,6 +104,19 @@ def test_sensor_buffer_sync_requires_l1_l2_not_camera():
     assert frame["lidar_02"] == "rear"
 
 
+def test_sensor_buffer_uses_lidar_pair_time_for_output_timestamp():
+    from nodes.rtg_bev_node import SensorBuffer
+
+    buffer = SensorBuffer(maxlen=10)
+    buffer.add("front", 10.00, "lidar_01")
+    buffer.add("rear", 10.02, "lidar_02")
+    buffer.add("camera", 10.04, "camera_01")
+
+    frame = buffer.get_synced_frame(window=0.05)
+
+    assert frame is not None
+    assert frame["timestamp"] == 10.02
+
 def test_sensor_buffer_does_not_emit_same_lidar_pair_twice():
     from nodes.rtg_bev_node import SensorBuffer
 

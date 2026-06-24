@@ -143,7 +143,7 @@ class SensorBuffer:
                 self._last_emitted_lidar_pair_time = pair_time
                 return {
                     **group,
-                    'timestamp': anchor_ts,
+                    'timestamp': pair_time,
                 }
 
         return None
