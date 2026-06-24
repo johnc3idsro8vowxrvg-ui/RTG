@@ -14,6 +14,7 @@ from torch import double, nn
 from det3d.models.losses.centernet_loss import FastFocalLoss, RegLoss
 from det3d.models.utils import Sequential
 from ..registry import HEADS
+from .merge_utils import merge_task_predictions
 import copy 
 try:
     from det3d.ops.dcn import DeformConv
@@ -425,27 +426,7 @@ class CenterHead(nn.Module):
             else:
                 rets.append(self.post_processing(batch_box_preds, batch_hm, test_cfg, post_center_range, task_id)) 
 
-        # Merge branches results
-        ret_list = []
-        num_samples = len(rets[0])
-
-        ret_list = []
-        for i in range(num_samples):
-            ret = {}
-            for k in rets[0][i].keys():
-                if k in ["box3d_lidar", "scores"]:
-                    ret[k] = torch.cat([ret[i][k] for ret in rets])
-                elif k in ["label_preds"]:
-                    flag = 0
-                    for j, num_class in enumerate(self.num_classes):
-                        rets[j][i][k] += flag
-                        flag += num_class
-                    ret[k] = torch.cat([ret[i][k] for ret in rets])
-
-            ret['metadata'] = metas[0][i]
-            ret_list.append(ret)
-
-        return ret_list 
+        return merge_task_predictions(rets, metas, self.num_classes, torch.cat)
 
     @torch.no_grad()
     def post_processing(self, batch_box_preds, batch_hm, test_cfg, post_center_range, task_id):
@@ -503,4 +484,4 @@ def _circle_nms(boxes, min_radius, post_max_size=83):
 
     keep = torch.from_numpy(keep).long().to(boxes.device)
 
-    return keep  
+    return keep

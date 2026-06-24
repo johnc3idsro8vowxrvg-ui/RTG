@@ -423,6 +423,45 @@ def test_centerpoint_coordinates_include_batch_index():
     )
 
 
+def test_centerpoint_merge_offsets_multitask_labels_without_torch():
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[1]
+    merge_utils = root / "CenterPoint" / "det3d" / "models" / "bbox_heads" / "merge_utils.py"
+    spec = importlib.util.spec_from_file_location("centerpoint_merge_utils", merge_utils)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    rets = [
+        [
+            {
+                "box3d_lidar": np.array([[1.0, 0.0]], dtype=np.float32),
+                "scores": np.array([0.8], dtype=np.float32),
+                "label_preds": np.array([0], dtype=np.int64),
+            }
+        ],
+        [
+            {
+                "box3d_lidar": np.array([[2.0, 0.0]], dtype=np.float32),
+                "scores": np.array([0.9], dtype=np.float32),
+                "label_preds": np.array([1], dtype=np.int64),
+            }
+        ],
+    ]
+
+    merged = module.merge_task_predictions(
+        rets,
+        metas=[["sample-meta"], ["ignored-meta"]],
+        num_classes=[1, 2],
+        cat=lambda values: np.concatenate(values, axis=0),
+    )
+
+    assert len(merged) == 1
+    np.testing.assert_allclose(merged[0]["box3d_lidar"], [[1.0, 0.0], [2.0, 0.0]])
+    np.testing.assert_allclose(merged[0]["scores"], [0.8, 0.9])
+    np.testing.assert_array_equal(merged[0]["label_preds"], [0, 2])
+    assert merged[0]["metadata"] == "sample-meta"
+
 def test_centerpoint_device_selection_honors_cuda_id_and_cpu_fallback():
     from nodes.rtg_bev_node import _resolve_torch_device
 
