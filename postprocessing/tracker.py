@@ -100,7 +100,7 @@ class KalmanBoxTracker:
     # Update
     # ------------------------------------------------------------------
     def update(self, bbox: np.ndarray, class_id: int = 0,
-               confidence: float = 0.0) -> None:
+               confidence: float = 0.0, min_hits_confirm: int = 3) -> None:
         """用观测更新卡尔曼状态。
 
         Parameters
@@ -109,6 +109,8 @@ class KalmanBoxTracker:
         class_id : int
         confidence : float
             当前帧检测置信度 (0~1)
+        min_hits_confirm : int
+            Hits required to promote a candidate track to confirmed.
         """
         self.hits += 1
         self.time_since_update = 0
@@ -134,7 +136,7 @@ class KalmanBoxTracker:
             self._x_hat[8] = (bbox[1] - old_y) / dt_v
 
         # 状态机晋升
-        if self.state == _StateConst.CANDIDATE and self.hits >= 3:
+        if self.state == _StateConst.CANDIDATE and self.hits >= min_hits_confirm:
             self.state = _StateConst.CONFIRMED
 
     def mark_missed(self) -> None:
@@ -399,6 +401,7 @@ class Tracker:
 
         # 3) 贪婪匹配
         iou_thresh = self.config.get('iou_threshold', 0.1)
+        min_hits = self.config.get('min_hits_confirm', 3)
         matches, unmatched_tracks, unmatched_dets = self._associate(
             cost, iou_thresh
         )
@@ -409,7 +412,9 @@ class Tracker:
             bbox = det_boxes[det_idx]
             cls_id = dets[det_idx].get('class_id', 0)
             conf = dets[det_idx].get('confidence', 0.0)
-            trk.update(bbox, class_id=cls_id, confidence=conf)
+            trk.update(
+                bbox, class_id=cls_id, confidence=conf, min_hits_confirm=min_hits
+            )
 
         # 5) 标记未匹配的轨迹
         for trk_idx in unmatched_tracks:
@@ -424,6 +429,8 @@ class Tracker:
             new_trk = KalmanBoxTracker(bbox, self._next_id, init_confidence=conf)
             new_trk.class_id = cls_id
             new_trk.state = _StateConst.CANDIDATE
+            if new_trk.hits >= min_hits:
+                new_trk.state = _StateConst.CONFIRMED
             self._tracks[self._next_id] = new_trk
             self._next_id += 1
 
@@ -438,7 +445,6 @@ class Tracker:
             del self._tracks[tid]
 
         # 8) 构建输出，应用 min_hits 过滤
-        min_hits = self.config.get('min_hits_confirm', 3)
         publish_internal = self.config.get('publish_internal_tracks', False)
 
         tracks_out = []

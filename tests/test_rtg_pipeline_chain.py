@@ -324,6 +324,34 @@ def test_tracker_empty_detection_update_counts_one_miss():
     assert tracks[0]["time_since_update"] == 1
 
 
+def test_tracker_min_hits_confirm_controls_track_state():
+    from postprocessing.tracker import Tracker
+
+    tracker = Tracker(
+        {
+            "min_hits_confirm": 1,
+            "publish_internal_tracks": False,
+            "max_age_lost": 5,
+        }
+    )
+    det = {
+        "class_id": 0,
+        "confidence": 0.95,
+        "x": 1.0,
+        "y": 2.0,
+        "z": 0.5,
+        "w": 0.8,
+        "l": 0.8,
+        "h": 1.7,
+        "yaw": 0.0,
+    }
+
+    tracks = tracker.update([det], timestamp=1.0)
+
+    assert len(tracks) == 1
+    assert tracks[0]["state_name"] == "confirmed"
+    assert tracks[0]["track_id"] >= 0
+
 def test_tracker_does_not_match_different_classes_at_same_location():
     from postprocessing.tracker import Tracker
 
