@@ -139,6 +139,29 @@ def test_sensor_buffer_does_not_emit_same_lidar_pair_twice():
     assert frame["lidar_02"] == "rear-2"
 
 
+def test_sensor_buffer_skips_emitted_pair_when_late_old_message_arrives():
+    from nodes.rtg_bev_node import SensorBuffer
+
+    buffer = SensorBuffer(maxlen=10)
+    buffer.add("front-1", 10.00, "lidar_01")
+    buffer.add("rear-1", 10.02, "lidar_02")
+
+    first = buffer.get_synced_frame(window=0.05)
+    assert first is not None
+    assert first["timestamp"] == 10.02
+
+    buffer.add("front-2", 10.10, "lidar_01")
+    buffer.add("rear-2", 10.12, "lidar_02")
+    buffer.add("late-camera-old", 10.03, "camera_01")
+
+    frame = buffer.get_synced_frame(window=0.05)
+
+    assert frame is not None
+    assert frame["timestamp"] == 10.12
+    assert frame["lidar_01"] == "front-2"
+    assert frame["lidar_02"] == "rear-2"
+
+
 def test_extract_timestamp_rejects_device_internal_time(monkeypatch):
     import nodes.rtg_bev_node as node_mod
 

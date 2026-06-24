@@ -139,7 +139,7 @@ class SensorBuffer:
                     self._last_emitted_lidar_pair_time is not None and
                     pair_time <= self._last_emitted_lidar_pair_time + 1e-9
                 ):
-                    return None
+                    continue
                 self._last_emitted_lidar_pair_time = pair_time
                 return {
                     **group,
