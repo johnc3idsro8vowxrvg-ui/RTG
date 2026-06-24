@@ -705,6 +705,39 @@ def test_warning_ego_motion_config_enables_static_close_alert(tmp_path):
     assert result["warnings"][0]["warning_level"] == WarningLevel.INFO
 
 
+def test_ego_motion_dynamic_removal_uses_configured_detection_margin(monkeypatch):
+    import postprocessing.ego_motion as ego_motion
+
+    monkeypatch.setattr(ego_motion, "HAS_OPEN3D", False)
+
+    estimator = ego_motion.EgoMotionEstimator(
+        {
+            "ground_height_range": [-0.2, 0.2],
+            "detection_box_margin": 0.0,
+        }
+    )
+    points = np.array(
+        [
+            [0.4, 0.0, 1.0],
+            [0.9, 0.0, 1.0],
+            [2.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    detections = [
+        {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "l": 1.0,
+            "yaw": 0.0,
+        }
+    ]
+
+    static = estimator._extract_static_points(points, detections)
+
+    np.testing.assert_allclose(static, [[0.9, 0.0, 1.0], [2.0, 0.0, 1.0]])
+
 def test_ego_motion_numpy_fallback_detects_plus_x_without_open3d(monkeypatch):
     import postprocessing.ego_motion as ego_motion
     from postprocessing.constants import EgoMotionState

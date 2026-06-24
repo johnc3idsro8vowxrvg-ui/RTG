@@ -256,8 +256,8 @@ class EgoMotionEstimator:
             non_ground_mask = (z < gh_min) | (z > gh_max)
             return points[non_ground_mask]
 
-    @staticmethod
     def _remove_dynamic_objects(
+        self,
         points: np.ndarray,
         detections: Optional[List[Dict[str, Any]]],
     ) -> np.ndarray:
@@ -269,7 +269,7 @@ class EgoMotionEstimator:
 
         # 构造 mask
         keep = np.ones(len(points), dtype=bool)
-        margin = 0.5
+        margin = max(0.0, float(self.config.get('detection_box_margin', 0.5)))
 
         for det in detections:
             dx = det.get('x', 0.0)
