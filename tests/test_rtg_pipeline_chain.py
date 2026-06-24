@@ -696,6 +696,44 @@ def test_process_frame_runs_detection_tracking_warning_and_bev_debug(tmp_path, m
     assert len(list((tmp_path / "bev").glob("*.png"))) == 3
 
 
+def test_warning_immediate_danger_overrides_confirmation(tmp_path):
+    from postprocessing.config_loader import ConfigLoader
+    from postprocessing.constants import EgoMotionState, WarningLevel
+    from postprocessing.warning_engine import WarningEngine
+
+    _copy_runtime_configs(tmp_path)
+    warning_path = tmp_path / "warning.yaml"
+    warning_cfg = yaml.safe_load(warning_path.read_text(encoding="utf-8"))
+    warning_cfg["distance_thresholds"]["person"] = {
+        "danger": 4.0,
+        "warning": 10.0,
+        "info": 20.0,
+    }
+    warning_cfg["immediate_danger"]["person"] = 8.0
+    warning_cfg["frame_confirmation"]["warning_confirm_frames"] = 3
+    warning_path.write_text(yaml.safe_dump(warning_cfg, allow_unicode=True), encoding="utf-8")
+
+    loader = ConfigLoader(str(tmp_path))
+    loader.load_all()
+    engine = WarningEngine(loader)
+
+    result = engine.evaluate(
+        [
+            {
+                "track_id": 7,
+                "class_id": 0,
+                "confidence": 0.95,
+                "x": 6.0,
+                "y": 0.0,
+            }
+        ],
+        EgoMotionState.UNKNOWN,
+        timestamp=100.0,
+    )
+
+    assert len(result["warnings"]) == 1
+    assert result["warnings"][0]["warning_level"] == WarningLevel.DANGER
+
 def test_warning_ego_motion_config_disables_static_close_alert(tmp_path):
     from postprocessing.config_loader import ConfigLoader
     from postprocessing.constants import EgoMotionState

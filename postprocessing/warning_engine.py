@@ -49,6 +49,7 @@ class WarningEngine:
         self._refresh_config()
 
         thresholds = self._config_loader.get_distance_thresholds()
+        immediate_danger = self._config_loader.warning.get('immediate_danger', {})
         frame_conf = self._config_loader.get_frame_confirmation()
         ego_cfg = self._config_loader.get_ego_motion_config()
         static_policy = self._build_static_policy(ego_cfg)
@@ -77,6 +78,8 @@ class WarningEngine:
 
             # 3) 基础等级 (距离 → 等级)
             base_level = self._distance_to_level(distance, cls_thresholds)
+            if self._is_immediate_danger(distance, class_name, immediate_danger):
+                base_level = WarningLevel.DANGER
 
             # 4) 运动方向修正
             weighted_level = self._apply_direction_weight(base_level, dir_weight)
@@ -223,6 +226,13 @@ class WarningEngine:
     # ==================================================================
     # 距离 → 等级
     # ==================================================================
+    @staticmethod
+    def _is_immediate_danger(distance: float, class_name: str, thresholds: Dict[str, float]) -> bool:
+        threshold = thresholds.get(class_name, thresholds.get('other_obstacle'))
+        if threshold is None:
+            return False
+        return distance <= float(threshold)
+
     @staticmethod
     def _distance_to_level(distance: float, thresholds: Dict[str, float]) -> int:
         danger_d = thresholds.get('danger', 8.0)
