@@ -128,9 +128,13 @@ class SensorBuffer:
                     continue
                 entry = buffer_list[j]
                 if abs(entry['timestamp'] - anchor_ts) <= window:
-                    if entry['sensor'] not in group:
-                        group[entry['sensor']] = entry['msg']
-                        group_ts[entry['sensor']] = entry['timestamp']
+                    sensor = entry['sensor']
+                    existing_dt = abs(group_ts[sensor] - anchor_ts) \
+                        if sensor in group_ts else float('inf')
+                    entry_dt = abs(entry['timestamp'] - anchor_ts)
+                    if entry_dt < existing_dt:
+                        group[sensor] = entry['msg']
+                        group_ts[sensor] = entry['timestamp']
 
             # V1 LiDAR-only 闭环需要 L1/L2；相机是可视化/扩展输入。
             if 'lidar_01' in group and 'lidar_02' in group:

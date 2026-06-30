@@ -162,6 +162,22 @@ def test_sensor_buffer_skips_emitted_pair_when_late_old_message_arrives():
     assert frame["lidar_02"] == "rear-2"
 
 
+def test_sensor_buffer_prefers_closest_message_per_sensor():
+    from nodes.rtg_bev_node import SensorBuffer
+
+    buffer = SensorBuffer(maxlen=10)
+    buffer.add("front-old", 10.00, "lidar_01")
+    buffer.add("front-close", 10.04, "lidar_01")
+    buffer.add("rear-anchor", 10.05, "lidar_02")
+
+    frame = buffer.get_synced_frame(window=0.10)
+
+    assert frame is not None
+    assert frame["lidar_01"] == "front-close"
+    assert frame["lidar_02"] == "rear-anchor"
+    assert frame["timestamp"] == 10.05
+
+
 def test_extract_timestamp_rejects_device_internal_time(monkeypatch):
     import nodes.rtg_bev_node as node_mod
 
