@@ -1,0 +1,217 @@
+# =============================================================================
+# system.yaml — RTG BEV 系统配置
+# =============================================================================
+# 用途: ROS1 接口、传感器订阅、性能目标、日志、调试
+# 加载: 系统启动时读取，部分项支持运行时热更新
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ROS1 通信配置
+# ---------------------------------------------------------------------------
+ros:
+  # 输入 topic — 订阅传感器数据
+  # 传感器命名: 1=左前(集卡侧), 2=左后(集卡侧), 3=右前(禁行侧), 4=右后(禁行侧)
+  subscribers:
+    camera_01:
+      topic: "/Camera_Raw_Img_01"      # 已确认: 左前(集卡侧)
+      type: "sensor_msgs/Image"
+      queue_size: 5
+    camera_02:
+      topic: "/Camera_Raw_Img_02"      # 已确认: 左后(集卡侧)
+      type: "sensor_msgs/Image"
+      queue_size: 5
+    camera_03:
+      topic: "/Camera_Raw_Img_03"      # 右前(禁行侧)
+      type: "sensor_msgs/Image"
+      queue_size: 5
+    camera_04:
+      topic: "/Camera_Raw_Img_04"      # 右后(禁行侧)
+      type: "sensor_msgs/Image"
+      queue_size: 5
+    lidar_01:
+      topic: "/ouster1/points"         # 已确认: 左前(集卡侧), OS1 128线
+      type: "sensor_msgs/PointCloud2"
+      queue_size: 5
+    lidar_02:
+      topic: "/ouster2/points"         # 已确认: 左后(集卡侧), OS1 128线
+      type: "sensor_msgs/PointCloud2"
+      queue_size: 5
+    lidar_03:
+      topic: "/lidar3/rslidar3_points" # 已确认: 右前(禁行侧), RoboSense 32线
+      type: "sensor_msgs/PointCloud2"
+      queue_size: 5
+    lidar_04:
+      topic: "/lidar4/rslidar4_points" # 已确认: 右后(禁行侧), RoboSense 32线
+      type: "sensor_msgs/PointCloud2"
+      queue_size: 5
+
+  # 输出 topic — 发布感知结果
+  publishers:
+    detections:
+      topic: "/rtg_bev/detections"
+      type: "rtg_bev_msgs/DetectionArray"
+      queue_size: 10
+      frame_id: "rtg_bev_origin"
+    tracks:
+      topic: "/rtg_bev/tracks"
+      type: "rtg_bev_msgs/TrackArray"
+      queue_size: 10
+      frame_id: "rtg_bev_origin"
+    warnings:
+      topic: "/rtg_bev/warnings"
+      type: "rtg_bev_msgs/WarningArray"
+      queue_size: 10
+      frame_id: "rtg_bev_origin"
+    ego_motion:
+      topic: "/rtg_bev/ego_motion"
+      type: "rtg_bev_msgs/EgoMotionState"
+      queue_size: 10
+      frame_id: "rtg_bev_origin"
+    diagnostics:
+      topic: "/rtg_bev/diagnostics"
+      type: "diagnostic_msgs/DiagnosticArray"
+      queue_size: 10
+
+  # 同步窗口: 四传感器时间戳对齐的容忍窗口 (秒)
+  sync_window: 0.05
+
+# ---------------------------------------------------------------------------
+# 传感器配置
+# ---------------------------------------------------------------------------
+sensors:
+  # 传感器命名: 1=左前(集卡侧前), 2=左后(集卡侧后), 3=右前(禁行侧前), 4=右后(禁行侧后)
+  # 设计原则: 换箱区后相机画面语义不变 (中心对称 + 前后互换)
+  # C1/C2 图像从左到右: 相邻箱区→中间车道→自车大车道→自车集卡道→自车集装箱道
+  cameras:
+    camera_01:
+      expected_fps: 10.0       # 实测 ~10 Hz (2026-05-19 测试数据)
+      encoding: "bgr8"
+      side: "truck_lane"       # 集卡侧
+      position: "front"        # 前支腿
+      view_semantic: "相邻箱区→中间车道→自车大车道→自车集卡道→自车集装箱道 (左→右)"
+    camera_02:
+      expected_fps: 10.0       # 实测 ~10 Hz
+      encoding: "bgr8"
+      side: "truck_lane"
+      position: "rear"
+      view_semantic: "同C1 (前后视角差异)"
+    camera_03:
+      expected_fps: 10.0       # 实测 ~10 Hz
+      encoding: "bgr8"
+      side: "forbidden"
+      position: "front"
+      view_semantic: "禁行侧外部铺装路面"
+    camera_04:
+      expected_fps: 10.0
+      encoding: "bgr8"
+      side: "forbidden"
+      position: "rear"
+      view_semantic: "同C3"
+  lidars:
+    lidar_01:
+      expected_fps: 10.0       # OS1 128线 (Ouster, 已确认)
+      num_fields: 8            # x,y,z,t,ring,range,reflectivity,near_ir
+      side: "truck_lane"
+      position: "front"
+    lidar_02:
+      expected_fps: 10.0       # OS1 128线 (Ouster, 已确认)
+      num_fields: 8
+      side: "truck_lane"
+      position: "rear"
+    lidar_03:
+      expected_fps: 10.0       # RoboSense 32线 (已确认)
+      num_fields: 4            # x,y,z,intensity
+      side: "forbidden"
+      position: "front"
+    lidar_04:
+      expected_fps: 10.0
+      num_fields: 4            # x,y,z,intensity
+      side: "forbidden"
+      position: "rear"
+
+# ---------------------------------------------------------------------------
+# 模型配置
+# ---------------------------------------------------------------------------
+model:
+  # 模型配置文件路径 (CenterPoint det3d 格式)
+  config_path: "configs/rtg/rtg_centerpoint_voxelnet.py"
+  # 模型权重路径
+  checkpoint_path: "work_dirs/rtg_centerpoint_voxelnet/latest.pth"
+  # 输入分辨率 (覆写模型配置文件中的值)
+  image_width: 1080
+  image_height: 1920
+  # 是否使用半精度推理
+  fp16: true
+
+# ---------------------------------------------------------------------------
+# Tracking configuration
+# ---------------------------------------------------------------------------
+tracking:
+  iou_threshold: 0.1
+  max_age_lost: 5
+  min_hits_confirm: 3
+  min_confidence: 0.2
+  publish_internal_tracks: false
+
+# ---------------------------------------------------------------------------
+# GPU 配置
+# ---------------------------------------------------------------------------
+gpu:
+  device_id: 0                # 主模型 GPU
+  allow_fallback_to_cpu: false
+
+# ---------------------------------------------------------------------------
+# 性能目标 (用于诊断判断，非硬限)
+# ---------------------------------------------------------------------------
+performance_targets:
+  max_inference_latency_ms: 150    # 模型推理延迟上限
+  max_end_to_end_latency_ms: 200   # 端到端延迟上限 (含前后处理)
+  min_output_fps: 10.0             # 最低输出帧率
+
+# ---------------------------------------------------------------------------
+# 日志
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"               # DEBUG / INFO / WARNING / ERROR
+  log_dir: "logs/"
+  # 是否保存检测/预警事件日志 (用于复盘)
+  save_event_log: true
+  # 预警触发前后保存 N 秒数据
+  event_snapshot_seconds: 10.0
+
+# ---------------------------------------------------------------------------
+# 调试与可视化
+# ---------------------------------------------------------------------------
+debug:
+  # 是否发布调试可视化 topic
+  publish_debug_topics: false
+
+  # BEV 鸟瞰图可视化
+  bev_visualization:
+    enabled: false
+    publish_topic: "/rtg_bev/debug/bev_viz"
+    show_detections: true
+    show_tracks: true
+    show_warning_zones: true
+    show_ego_footprint: true
+
+  # 图像投影叠加 (检测框 + 雷达点云投影)
+  image_projection:
+    enabled: false
+    publish_topic_prefix: "/rtg_bev/debug/projection"
+
+  # 点云发布 (调试用，体素下采样后的点云)
+  pointcloud_debug:
+    enabled: false
+    publish_topic: "/rtg_bev/debug/merged_points"
+    downsample_voxel: 0.1
+
+# ---------------------------------------------------------------------------
+# 数据回放模式
+# ---------------------------------------------------------------------------
+replay:
+  # 从 rosbag 回放而非在线订阅
+  enabled: false
+  bag_path: ""
+  # 回放速度: 1.0 = 实时, 0.5 = 半速
+  playback_speed: 1.0

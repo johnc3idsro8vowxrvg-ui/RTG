@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+
+# Output / visualizations / logs
+output/
+logs/
+
+# Large binary files (models, datasets, rosbags)
+*.onnx
+*.pth
+*.pkl
+*.bin
+*.bag
+
+# CUDA-CenterPoint build
+CUDA-CenterPoint/build/
+
